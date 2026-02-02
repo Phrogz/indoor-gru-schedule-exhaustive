@@ -1039,11 +1039,12 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
     const progressInterval = setInterval(() => {
       const now = performance.now();
 
-      // Periodic save
+      // Periodic save (include in-flight paths so we can resume if process crashes)
       if (now - lastSaveTime > SAVE_INTERVAL && allOptimal.length > 0) {
-        const count = saveOptimalToFile();
+        const inFlightPaths = workerInFlightPaths.filter(p => p !== null);
+        const count = saveOptimalToFile(false, inFlightPaths);
         lastSaveTime = now;
-        updateProgress(` | saved ${count}`);
+        updateProgress(` | saved ${count}${inFlightPaths.length > 0 ? ` +${inFlightPaths.length}…` : ''}`);
       } else {
         updateProgress();
       }
