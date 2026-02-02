@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Display schedules from saved .js files
+// Display schedules from saved .txt files
 
-import { pathToFileURL } from 'url';
 import { resolve } from 'path';
+import { readFileSync } from 'fs';
 
 // Parse command-line args
 const args = process.argv.slice(2);
@@ -25,40 +25,54 @@ if (!file) {
 	process.exit(1);
 }
 
-// Try to extract teams from filename (e.g., "6teams-week0.js" or "8teams-2weeks.js")
-let N_TEAMS = null;
-const teamsMatch = file.match(/(\d+)teams/);
-if (teamsMatch) N_TEAMS = parseInt(teamsMatch[1]);
+// Parse .txt format: header + tab-indented tree
+const content = readFileSync(resolve(file), 'utf-8');
+const lines = content.split('\n');
 
-// Load the file
-const absPath = resolve(file);
-let data;
-try {
-	const module = await import(pathToFileURL(absPath).href);
-	data = module.default;
-} catch (e) {
-	console.error(`Failed to load ${file}:`, e.message);
+// Parse header: # teams=N weeks=W score=X,Y count=Z
+const header = lines[0];
+const headerMatch = header.match(/^#\s*teams=(\d+)\s+weeks=(\d+)/);
+if (!headerMatch) {
+	console.error('Invalid file format: missing header');
 	process.exit(1);
 }
+const N_TEAMS = parseInt(headerMatch[1]);
 
-// Infer teams from data if not in filename
-if (!N_TEAMS && data.length > 0) {
-	// For week0 file: data is array of schedules, each schedule is array of matchups
-	// For multi-week: data is array of [week0, children] nodes
-	let sampleSchedule = data[0];
-	if (Array.isArray(sampleSchedule) && sampleSchedule.length === 2 && Array.isArray(sampleSchedule[1])) {
-		// Tree format: [schedule, children]
-		sampleSchedule = sampleSchedule[0];
+// Parse tree structure based on tab indentation
+let data = [];
+const stack = [{ children: data, depth: -1 }];
+
+for (let i = 1; i < lines.length; i++) {
+	const line = lines[i];
+	if (!line.trim()) continue;
+	
+	// Count leading tabs
+	let depth = 0;
+	while (depth < line.length && line[depth] === '\t') depth++;
+	
+	const schedule = line.trim().split(',').map(Number);
+	
+	// Pop stack until we find parent
+	while (stack.length > 1 && stack[stack.length - 1].depth >= depth) {
+		stack.pop();
 	}
-	// Number of slots = (N_TEAMS * 3) / 2, so N_TEAMS = slots * 2 / 3
-	const slots = sampleSchedule.length;
-	N_TEAMS = (slots * 2) / 3;
+	
+	const parent = stack[stack.length - 1];
+	const node = [schedule, []];
+	parent.children.push(node);
+	stack.push({ children: node[1], depth });
 }
 
-if (!N_TEAMS || N_TEAMS % 1 !== 0) {
-	console.error('Could not determine team count from file');
-	process.exit(1);
+// Convert nodes with empty children arrays to leaf nodes [schedule]
+function cleanTree(nodes) {
+	return nodes.map(node => {
+		if (node[1].length === 0) {
+			return [node[0]]; // Leaf node
+		}
+		return [node[0], cleanTree(node[1])]; // Internal node
+	});
 }
+data = cleanTree(data);
 
 const TEAMS = 'ABCDEFGHIJKLMNOP'.slice(0, N_TEAMS).split('');
 const N_SLOTS = (N_TEAMS * 3) / 2;
@@ -122,35 +136,21 @@ function flattenTree(node, path = []) {
 	if (isLeafNode(node)) {
 		// Leaf: [schedule] with no children
 		return [path.concat([node[0]])];
-	} else if (isTreeNode(node)) {
-		// Internal: [schedule, children]
-		const [schedule, children] = node;
-		const newPath = path.concat([schedule]);
-		const results = [];
-		for (const child of children) {
-			results.push(...flattenTree(child, newPath));
-		}
-		return results;
-	} else if (Array.isArray(node) && node.every(n => typeof n === 'number')) {
-		// Simple schedule array (week0-only format)
-		return [[node]];
 	}
-	return [];
+	// Internal: [schedule, children]
+	const [schedule, children] = node;
+	const newPath = path.concat([schedule]);
+	const results = [];
+	for (const child of children) {
+		results.push(...flattenTree(child, newPath));
+	}
+	return results;
 }
 
 // Parse schedules from data
-let schedules = [];
-
-if (data.length > 0) {
-	if (isTreeNode(data[0]) || isLeafNode(data[0])) {
-		// Multi-week tree format
-		for (const rootNode of data) {
-			schedules.push(...flattenTree(rootNode));
-		}
-	} else if (Array.isArray(data[0]) && data[0].every(n => typeof n === 'number')) {
-		// Week0-only format: array of schedule arrays
-		schedules = data.map(sched => [sched]);
-	}
+const schedules = [];
+for (const rootNode of data) {
+	schedules.push(...flattenTree(rootNode));
 }
 
 // Display header info
