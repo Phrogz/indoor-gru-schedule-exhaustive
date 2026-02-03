@@ -4,6 +4,7 @@
 import { createReadStream, readdirSync } from 'fs';
 import { createInterface } from 'readline';
 
+// const N_TEAMS = 6;
 const N_TEAMS = 8;
 
 /**

@@ -52,7 +52,7 @@ function printMatchupGrid(matchupCounts, nTeams) {
     header += ` ${TEAMS[t]}`;
   }
   console.log(header);
-  
+
   // Data rows
   for (let t1 = 0; t1 < nTeams - 1; t1++) {
     let row = ` ${TEAMS[t1]} `;
@@ -72,17 +72,17 @@ function printMatchupGrid(matchupCounts, nTeams) {
 function showMatchupGrids(weeks, nTeams) {
   // matchupCounts[t1][t2] = number of games between team t1 and t2
   const matchupCounts = Array.from({ length: nTeams }, () => new Array(nTeams).fill(0));
-  
+
   for (let weekNum = 0; weekNum < weeks.length; weekNum++) {
     const week = weeks[weekNum];
-    
+
     // Update matchup counts
     for (const m of week) {
       const [t1, t2] = decodeMatchup(m, nTeams);
       matchupCounts[t1][t2]++;
       matchupCounts[t2][t1]++;
     }
-    
+
     // Show decoded games
     const decoded = week.map(m => formatMatchup(m, nTeams));
     console.log(`Week ${weekNum}: ${decoded.join(' ')}`);
@@ -113,10 +113,10 @@ function parseTreeWeek(line) {
 function loadFromEvaluatedFile(filePath, scheduleId, nTeams) {
   const content = readFileSync(filePath, 'utf8');
   const lines = content.split('\n');
-  
+
   let inTargetSchedule = false;
   let weeks = [];
-  
+
   for (const line of lines) {
     if (line.startsWith('Schedule ')) {
       // Check if this is our target schedule
@@ -139,11 +139,11 @@ function loadFromEvaluatedFile(filePath, scheduleId, nTeams) {
       if (week) weeks.push(week);
     }
   }
-  
+
   if (weeks.length === 0) {
     throw new Error(`Schedule ${scheduleId} not found in file`);
   }
-  
+
   return weeks;
 }
 
@@ -151,21 +151,21 @@ function loadFromEvaluatedFile(filePath, scheduleId, nTeams) {
 function loadFromTreeFile(filePath, pathNum, nTeams, nWeeks) {
   const content = readFileSync(filePath, 'utf8');
   const lines = content.split('\n');
-  
+
   const stack = []; // Current path being built
   let pathCount = 0;
-  
+
   for (const line of lines) {
     if (line.startsWith('#') || line.trim() === '' || line.trim() === '…') continue;
-    
+
     const depth = line.match(/^\t*/)[0].length;
     const week = parseTreeWeek(line);
     if (!week) continue;
-    
+
     // Trim stack to depth, then push new week
     stack.length = depth;
     stack.push(week);
-    
+
     // If we've built a full path
     if (stack.length === nWeeks) {
       pathCount++;
@@ -174,7 +174,7 @@ function loadFromTreeFile(filePath, pathNum, nTeams, nWeeks) {
       }
     }
   }
-  
+
   throw new Error(`Path ${pathNum} not found (only ${pathCount} paths in file)`);
 }
 
@@ -182,14 +182,14 @@ function loadFromTreeFile(filePath, pathNum, nTeams, nWeeks) {
 function parseHeader(filePath) {
   const content = readFileSync(filePath, 'utf8');
   const firstLine = content.split('\n')[0];
-  
+
   const teamsMatch = firstLine.match(/teams=(\d+)/);
   const weeksMatch = firstLine.match(/weeks=(\d+)/);
-  
+
   if (!teamsMatch || !weeksMatch) {
     throw new Error(`Could not parse header: ${firstLine}`);
   }
-  
+
   return {
     nTeams: parseInt(teamsMatch[1]),
     nWeeks: parseInt(weeksMatch[1])
@@ -200,12 +200,12 @@ function parseHeader(filePath) {
 function detectFileType(filePath) {
   const content = readFileSync(filePath, 'utf8');
   const lines = content.split('\n').slice(0, 10);
-  
+
   for (const line of lines) {
     if (line.startsWith('Schedule ')) return 'evaluated';
     if (line.match(/^\t*\d+,/)) return 'tree';
   }
-  
+
   return 'tree'; // default
 }
 
