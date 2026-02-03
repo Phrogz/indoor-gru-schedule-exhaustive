@@ -28,7 +28,7 @@ The search space grows exponentially with weeks. For 8 teams:
 - 1st week: ~20 seconds
 - 2nd week: ~80 minutes  
 - 3rd week: ~13 days
-- 4th week: ~3.5 **years**
+- 4th week: ~3.5 **years**?
 - 5th week: 35 years?
 - 6th week: 350 years??
 
@@ -117,10 +117,10 @@ multi-week schedule.
 
 ```txt
 0,3,9,5,11,18,16,21,19,17,15,26      # Week 0 schedule A
-	23,27,24,25,22,6,10,1,2,7,8,13     # Week 1 following A
-		14,1,22,3,15,4,8,12,20,11,21,27  # Week 2 following A→B
-			0,1,7,2,8,17,20,24,26,23,25,22 # Week 3 (complete path 1)
-			0,1,7,2,8,17,20,26,24,25,23,22 # Week 3 (complete path 2)
+  23,27,24,25,22,6,10,1,2,7,8,13     # Week 1 following A
+    14,1,22,3,15,4,8,12,20,11,21,27  # Week 2 following A→B
+      0,1,7,2,8,17,20,24,26,23,25,22 # Week 3 (complete path 1)
+      0,1,7,2,8,17,20,26,24,25,23,22 # Week 3 (complete path 2)
 ```
 
 Each line is a comma-separated list of **matchup indices** representing the

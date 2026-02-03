@@ -780,34 +780,47 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
     if (allOptimal.length === 0 && inFlightPaths.length === 0) return 0;
     const saveFile = `results/${N_TEAMS}teams-${N_WEEKS}week${N_WEEKS > 1 ? 's' : ''}.txt`;
 
-    // Build content directly (simpler than using TreeWriter for incremental saves)
-    let lines = [];
-    let totalCount = 0;
-    let prevPath = [];
-
+    // Collect all full paths from allOptimal entries
+    const allPaths = [];
     for (const entry of allOptimal) {
-      const week0 = entry.week0;
       for (const laterWeeks of entry.continuations) {
-        const path = [week0, ...laterWeeks];
-
-        // Find where this path diverges from previous
-        let commonDepth = 0;
-        while (commonDepth < prevPath.length &&
-               commonDepth < path.length &&
-               JSON.stringify(prevPath[commonDepth]) === JSON.stringify(path[commonDepth])) {
-          commonDepth++;
-        }
-
-        // Write all nodes from divergence point onwards
-        for (let depth = commonDepth; depth < path.length; depth++) {
-          const tabs = '\t'.repeat(depth);
-          lines.push(`${tabs}${path[depth].join(',')}`);
-        }
-
-        prevPath = path;
-        totalCount++;
+        allPaths.push([entry.week0, ...laterWeeks]);
       }
     }
+
+    // Sort lexicographically for optimal prefix compression
+    // Without sorting, interleaved worker results cause redundant prefix writes
+    allPaths.sort((a, b) => {
+      for (let i = 0; i < Math.min(a.length, b.length); i++) {
+        const cmp = a[i].join(',').localeCompare(b[i].join(','));
+        if (cmp !== 0) return cmp;
+      }
+      return a.length - b.length;
+    });
+
+    // Build content with prefix compression
+    let lines = [];
+    let prevPath = [];
+
+    for (const path of allPaths) {
+      // Find where this path diverges from previous
+      let commonDepth = 0;
+      while (commonDepth < prevPath.length &&
+             commonDepth < path.length &&
+             JSON.stringify(prevPath[commonDepth]) === JSON.stringify(path[commonDepth])) {
+        commonDepth++;
+      }
+
+      // Write all nodes from divergence point onwards
+      for (let depth = commonDepth; depth < path.length; depth++) {
+        const tabs = '\t'.repeat(depth);
+        lines.push(`${tabs}${path[depth].join(',')}`);
+      }
+
+      prevPath = path;
+    }
+
+    const totalCount = allPaths.length;
 
     // Append incomplete markers for in-flight paths
     // These are paths that workers were actively exploring when interrupted
