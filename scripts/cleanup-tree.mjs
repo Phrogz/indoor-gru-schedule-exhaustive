@@ -105,7 +105,7 @@ for (const line of outputLines) {
 }
 
 // Write output
-const header = `# teams=${teams} weeks=${weeks} score=${score} count=${paths.length}`;
+const header = `# teams=${teams} weeks=${weeks} count=${paths.length}`;
 const outputFile = inputFile.replace('.txt', '-clean.txt');
 writeFileSync(outputFile, header + '\n' + outputLines.join('\n') + '\n');
 

@@ -3,7 +3,7 @@
 //
 // Usage:
 //   node scripts/show-matchup-grid.mjs <file> <schedule-number>
-//   node scripts/show-matchup-grid.mjs results/8teams-6weeks-evaluated.txt 1
+//   node scripts/show-matchup-grid.mjs results/8teams-6weeks-best.txt 4132
 //   node scripts/show-matchup-grid.mjs results/8teams-4weeks.txt 42
 
 import { readFileSync } from 'fs';
