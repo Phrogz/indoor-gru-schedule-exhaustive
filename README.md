@@ -26,7 +26,7 @@ node display.mjs results/8teams-3weeks.txt --limit=5
 The search space grows exponentially with weeks. For 8 teams:
 
 - 1st week: ~20 seconds
-- 2nd week: ~80 minutes  
+- 2nd week: ~1 hour
 - 3rd week: ~13 days
 - 4th week: ~3.5 **years**?
 - 5th week: 35 years?
@@ -35,7 +35,7 @@ The search space grows exponentially with weeks. For 8 teams:
 A pragmatic approach:
 
 1. Run each week one at a time, i.e. run weeks=1, then weeks=2, then weeks=3
-2. After accumulating "enough" optimal schedules, kill the process and move on.
+2. After accumulating "enough" optimal schedules at each step, kill the process and move on.
    - The generator automatically resumes from partial prior results.
    - We won't get to explore EVERY combination, but maybe looking through a few tens of million is enough?
 
@@ -84,7 +84,7 @@ By exploring from scratch without these constraints, we can find schedules that:
 
 - Have fewer total double-byes (3-slot gaps between a team's games)
 - Have fewer teams with 5-slot spans (games spread across 5+ time slots)
-- Never require a team to be present at the field for 6 slots:  
+- Never require a team to be present at the field for 6 slots:
   (game-bye-game-bye-bye-game)
 
 ### Scoring

@@ -1,8 +1,26 @@
 #!/usr/bin/env node
 // Analyze game statistics from result files
 
-import { createReadStream } from 'fs';
+import { createReadStream, readdirSync } from 'fs';
 import { createInterface } from 'readline';
+
+const N_TEAMS = 8;
+
+/**
+ * Find the maximum week count available in result files for N_TEAMS.
+ * @returns {number} Maximum week count found, or 0 if no files exist
+ */
+function findMaxWeeks() {
+	const pattern = new RegExp(`^${N_TEAMS}teams-(\\d+)weeks?\\.txt$`);
+	let maxWeeks = 0;
+	for (const file of readdirSync('results')) {
+		const match = file.match(pattern);
+		if (match) {
+			maxWeeks = Math.max(maxWeeks, parseInt(match[1], 10));
+		}
+	}
+	return maxWeeks;
+}
 
 /**
  * Count how many children each parent node has at a given depth in a tab-indented tree file.
@@ -87,15 +105,15 @@ function calculateStats(numbers) {
  * @param {string} [note] - Optional note to display after filename
  */
 async function analyzeFile(fileWeeks, note = '') {
-	const filepath = `results/8teams-${fileWeeks}weeks.txt`;
+	const filepath = `results/${N_TEAMS}teams-${fileWeeks}weeks.txt`;
 	const parentDepth = fileWeeks - 2;  // 0-indexed depth of parent nodes
-	
+
 	// User-facing week numbers (1-indexed)
 	const parentWeek = fileWeeks - 1;
 	const childWeek = fileWeeks;
 
 	console.log('='.repeat(70));
-	console.log(`8teams-${fileWeeks}weeks.txt${note}`);
+	console.log(`${N_TEAMS}teams-${fileWeeks}weeks.txt${note}`);
 	console.log('='.repeat(70));
 
 	const counts = await countChildrenAtDepth(filepath, parentDepth);
@@ -117,18 +135,24 @@ async function analyzeFile(fileWeeks, note = '') {
 // Main execution
 const args = process.argv.slice(2);
 const analysisType = args[0] || 'all';
+const maxWeeks = findMaxWeeks();
+
+if (maxWeeks < 2) {
+	console.log(`No result files found for ${N_TEAMS} teams with 2+ weeks.`);
+	process.exit(1);
+}
 
 if (analysisType === 'all') {
-	for (let weeks = 2; weeks <= 5; weeks++) {
+	for (let weeks = 2; weeks <= maxWeeks; weeks++) {
 		if (weeks > 2) console.log('\n');
 		const note = weeks === 3 ? ' (partial file)' : '';
 		await analyzeFile(weeks, note);
 	}
 } else {
 	const weeks = parseInt(analysisType.replace('weeks', ''), 10);
-	if (weeks >= 2 && weeks <= 5) {
+	if (weeks >= 2 && weeks <= maxWeeks) {
 		await analyzeFile(weeks);
 	} else {
-		console.log('Usage: node analyze_stats.mjs [all|2weeks|3weeks|4weeks|5weeks]');
+		console.log(`Usage: node analyze_stats.mjs [all|2weeks|3weeks|...|${maxWeeks}weeks]`);
 	}
 }

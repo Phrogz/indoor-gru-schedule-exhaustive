@@ -190,6 +190,10 @@ function enumerateSchedules(options) {
 
   function backtrack(slot) {
     if (slot === N_SLOTS) {
+      // Verify all required matchups were placed
+      for (let ti = 0; ti < N_TEAMS; ti++) {
+        if (requiredOpponents[ti].size > 0) return;  // Required matchup missing
+      }
       count++;
       if (onSchedule) onSchedule(games);
       return;
@@ -302,6 +306,23 @@ function enumerateSchedules(options) {
   return count;
 }
 
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  ⚠️  CRITICAL: ROUND-ROBIN CROSS-WEEK RULES  ⚠️                              ║
+// ║                                                                              ║
+// ║  When a week STRADDLES TWO ROUNDS, games from the NEW round may appear in    ║
+// ║  ANY slot - INCLUDING BEFORE games that complete the current round!          ║
+// ║                                                                              ║
+// ║  Example: 6 teams, week 1 with interleaved rounds:                           ║
+// ║  - Week 0 used matchups: {0,2,3,6,8,9,10,11,14} (9 of 15 in round 0)         ║
+// ║  - Required to complete round 0: {1,4,5,7,12,13} (6 matchups)                ║
+// ║  - Valid week 1: [1,0,5,4,9,7,13,14,12]                                      ║
+// ║    - Matchups 0,9,14 are round 1 games (reusing week 0's matchups)           ║
+// ║    - These appear BEFORE some round 0 games — THIS IS VALID!                 ║
+// ║                                                                              ║
+// ║  The ONLY requirement: all requiredMatchups appear SOMEWHERE in the week.    ║
+// ║  There is NO slot-order constraint based on round membership.                ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
 // Track which matchups have been used in each round
 // roundMatchups[roundNum] = Set of matchup indices used in that round
 function getRoundConstraints(weekStartGame, roundMatchups) {
@@ -390,19 +411,48 @@ if (!isMainThread) {
   const { inputPaths, startWeek, numWeeks, nTeams, nSlots, nMatchups } = workerData;
 
   let totalPaths = 0;
-  let bestScore = [Infinity, Infinity];
-  let bestCount = 0;
+  let optimalCount = 0;
   let minPerPath = Infinity;
   let maxPerPath = 0;
   let totalPerPath = 0;
 
-  // Collect optimal schedules: Map<week0Key, Array<laterWeeks>>
-  // week0Key is week0.join(','), laterWeeks is array of remaining weeks
-  const optimalByWeek0 = new Map();
+  // OPTIMIZATION: Pre-computed optimal score (2 doubleByes, 4 fiveSlotTeams per week)
+  const TARGET_SCORE = [2 * numWeeks, 4 * numWeeks];
+
+  // MEMORY OPTIMIZATION: Store continuations as packed Uint8Arrays
+  // Each continuation is (numWeeks - 1) weeks × nSlots bytes
+  const CONTINUATION_SIZE = (numWeeks - 1) * nSlots;
   let currentWeek0Key = null;
+  // Store as array of Uint8Arrays (each is a packed continuation)
   let currentWeek0Optimal = [];
 
+  // Pack weeks 1..N into a single Uint8Array
+  function packContinuation(weeks) {
+    const packed = new Uint8Array(CONTINUATION_SIZE);
+    for (let w = 1; w < weeks.length; w++) {
+      const offset = (w - 1) * nSlots;
+      const week = weeks[w];
+      for (let i = 0; i < nSlots; i++) {
+        packed[offset + i] = week[i];
+      }
+    }
+    return packed;
+  }
+
+  // Unpack a continuation for sending (returns array of arrays)
+  function unpackContinuation(packed) {
+    const result = [];
+    for (let w = 0; w < numWeeks - 1; w++) {
+      const offset = w * nSlots;
+      result.push(Array.from(packed.subarray(offset, offset + nSlots)));
+    }
+    return result;
+  }
+
   // Rebuild round tracking from a path of weeks
+  // NOTE: When a week straddles rounds, we must process ALL required matchups
+  // first (to complete the current round), then ALL extras (to start the new round).
+  // We cannot process in slot order because extras may appear before required matchups.
   function rebuildRoundMatchups(path) {
     const roundMatchups = new Map();
     let currentRound = 0;
@@ -410,27 +460,32 @@ if (!isMainThread) {
 
     for (let weekNum = 0; weekNum < path.length; weekNum++) {
       const week = path[weekNum];
-      const weekStartGame = weekNum * nSlots;
-      const gamesRemainingInRound = nMatchups - (usedInRound.size);
+      const gamesRemainingInRound = nMatchups - usedInRound.size;
 
-      // Determine which matchups complete current round vs start new round
       if (gamesRemainingInRound <= nSlots) {
-        // This week straddles rounds
+        // This week straddles rounds - process required first, then extras
         const required = new Set();
         for (let m = 0; m < nMatchups; m++) {
           if (!usedInRound.has(m)) required.add(m);
         }
 
+        // First pass: add all required matchups to complete current round
         for (const m of week) {
           if (required.has(m)) {
             usedInRound.add(m);
-          } else {
-            // Starts new round
-            if (usedInRound.size === nMatchups) {
-              roundMatchups.set(currentRound, usedInRound);
-              currentRound++;
-              usedInRound = new Set();
-            }
+          }
+        }
+
+        // Round should now be complete
+        if (usedInRound.size === nMatchups) {
+          roundMatchups.set(currentRound, usedInRound);
+          currentRound++;
+          usedInRound = new Set();
+        }
+
+        // Second pass: add all extras to start new round
+        for (const m of week) {
+          if (!required.has(m)) {
             usedInRound.add(m);
           }
         }
@@ -450,31 +505,37 @@ if (!isMainThread) {
     return roundMatchups;
   }
 
+  // OPTIMIZATION: Optimal score per week is always [2,4]
+  const OPTIMAL_WEEK_SCORE = [2, 4];
+
+  // MEMORY OPTIMIZATION: Flush accumulated results every N paths to prevent heap exhaustion
+  const FLUSH_THRESHOLD = 10000;
+
+  function flushOptimalIfNeeded(week0, force = false) {
+    if (currentWeek0Optimal.length >= FLUSH_THRESHOLD || (force && currentWeek0Optimal.length > 0)) {
+      const BATCH_SIZE = 10000;
+      for (let i = 0; i < currentWeek0Optimal.length; i += BATCH_SIZE) {
+        const batch = currentWeek0Optimal.slice(i, i + BATCH_SIZE);
+        parentPort.postMessage({
+          type: 'optimal',
+          week0: Array.from(week0),
+          continuations: batch.map(unpackContinuation),
+          score: TARGET_SCORE,
+          count: batch.length
+        });
+      }
+      currentWeek0Optimal = [];
+    }
+  }
+
   function enumerateFromPath(week0, weekNum, roundMatchups, weeks) {
     if (weekNum === numWeeks) {
+      // All weeks passed the [2,4] check, so this is optimal
       totalPaths++;
-
-      let totalDoubleByes = 0;
-      let totalFiveSlotTeams = 0;
-      for (const week of weeks) {
-        const score = scoreSchedule(week);
-        totalDoubleByes += score.doubleByes;
-        totalFiveSlotTeams += score.fiveSlotTeams;
-      }
-      const s = [totalDoubleByes, totalFiveSlotTeams];
-
-      if (s[0] < bestScore[0] || (s[0] === bestScore[0] && s[1] < bestScore[1])) {
-        // New best score - clear all previous optimal and reset
-        bestScore = s;
-        bestCount = 1;
-        optimalByWeek0.clear();
-        currentWeek0Optimal = [];
-        // Save all weeks after week0
-        currentWeek0Optimal.push(weeks.slice(1).map(w => Array.from(w)));
-      } else if (s[0] === bestScore[0] && s[1] === bestScore[1]) {
-        bestCount++;
-        currentWeek0Optimal.push(weeks.slice(1).map(w => Array.from(w)));
-      }
+      optimalCount++;
+      currentWeek0Optimal.push(packContinuation(weeks));
+      // Flush periodically to prevent memory buildup
+      flushOptimalIfNeeded(week0);
       return;
     }
 
@@ -485,6 +546,13 @@ if (!isMainThread) {
       excludeMatchups,
       requiredMatchups,
       onSchedule: (sched) => {
+        // OPTIMIZATION: Check this week's score immediately, skip if not optimal
+        const score = scoreSchedule(sched);
+        if (score.doubleByes !== OPTIMAL_WEEK_SCORE[0] || score.fiveSlotTeams !== OPTIMAL_WEEK_SCORE[1]) {
+          totalPaths++;  // Still count as explored
+          return;  // Prune this branch
+        }
+
         const weekMatchups = Array.from(sched);
         const newRoundMatchups = updateRoundMatchups(weekNum, weekMatchups, roundMatchups, requiredMatchups);
         const newWeeks = weeks.concat([new Uint8Array(sched)]);
@@ -513,16 +581,8 @@ if (!isMainThread) {
     // Continue enumeration from where the input path left off
     enumerateFromPath(week0, startWeek, roundMatchups, weeks);
 
-    // Send optimal for this week0 if any (incremental updates)
-    if (currentWeek0Optimal.length > 0) {
-      parentPort.postMessage({
-        type: 'optimal',
-        week0: Array.from(week0),
-        continuations: currentWeek0Optimal,
-        score: bestScore,
-        count: currentWeek0Optimal.length
-      });
-    }
+    // Flush any remaining optimal paths for this week0
+    flushOptimalIfNeeded(week0, true);
 
     const pathsForThisInput = totalPaths - pathsBefore;
     if (pathsForThisInput < minPerPath) minPerPath = pathsForThisInput;
@@ -536,8 +596,7 @@ if (!isMainThread) {
 
   parentPort.postMessage({ type: 'done',
     totalPaths,
-    bestScore,
-    bestCount,
+    optimalCount,
     pathCount: inputPaths.length,
     minPerPath,
     maxPerPath,
@@ -768,136 +827,119 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
   // Track progress and optimal results from all workers
   let totalPathsSoFar = 0;
 
-  // Global optimal tracking (updated incrementally)
-  let globalBestScore = [Infinity, Infinity];
-  const allOptimal = []; // Array of {week0, continuations}
-  const existingPathKeys = new Set();  // For deduplication during resume
-  let lastSaveTime = performance.now();
-  const SAVE_INTERVAL = 60000; // Save every 60 seconds
+  // OPTIMIZATION: Pre-computed optimal score (2 doubleByes, 4 fiveSlotTeams per week)
+  const TARGET_SCORE = [2 * N_WEEKS, 4 * N_WEEKS];
 
-  function saveOptimalToFile(isFinal = false, inFlightPaths = []) {
-    if (VALIDATE) return 0; // Skip saving in validate mode
-    if (allOptimal.length === 0 && inFlightPaths.length === 0) return 0;
-    const saveFile = `results/${N_TEAMS}teams-${N_WEEKS}week${N_WEEKS > 1 ? 's' : ''}.txt`;
+  // MEMORY OPTIMIZATION: Instead of storing all paths in memory, we use a streaming
+  // TreeWriter and only keep track of counts and the last written path for prefix compression
+  let optimalCount = 0;
+  let optimalWriter = null;  // TreeWriter instance, created on first optimal result
+  let lastWrittenPath = null; // For prefix compression in streaming writes
+  const existingPathHashes = new Set();  // For deduplication during resume - use hashes instead of full keys
+  const saveFile = `results/${N_TEAMS}teams-${N_WEEKS}week${N_WEEKS > 1 ? 's' : ''}.txt`;
 
-    // Count total paths to decide strategy
-    let totalCount = 0;
-    for (const entry of allOptimal) {
-      totalCount += entry.continuations.length;
-    }
-
-    // For large datasets, skip expensive sorting - some prefix duplication is acceptable
-    // Sorting 3M+ paths uses too much memory (consolidation + sort + string comparisons)
-    const SORT_THRESHOLD = 100000;
-    const shouldSort = totalCount < SORT_THRESHOLD;
-
-    // Helper: compare two schedule arrays element-by-element
-    const schedulesEqual = (a, b) => {
-      if (a.length !== b.length) return false;
-      for (let i = 0; i < a.length; i++) {
-        if (a[i] !== b[i]) return false;
-      }
-      return true;
-    };
-
-    let entriesToWrite = allOptimal;
-
-    if (shouldSort) {
-      // Comparator for lexicographic sorting of continuation arrays
-      const compareContinuations = (a, b) => {
-        for (let i = 0; i < Math.min(a.length, b.length); i++) {
-          const cmp = a[i].join(',').localeCompare(b[i].join(','));
-          if (cmp !== 0) return cmp;
-        }
-        return a.length - b.length;
-      };
-
-      // Consolidate by week0, sort for optimal prefix compression
-      const byWeek0 = new Map();
-      for (const entry of allOptimal) {
-        const key = entry.week0.join(',');
-        if (!byWeek0.has(key)) {
-          byWeek0.set(key, { week0: entry.week0, continuations: [] });
-        }
-        const target = byWeek0.get(key).continuations;
-        for (const c of entry.continuations) {
-          target.push(c);
-        }
-      }
-
-      // Sort week0 entries
-      entriesToWrite = [...byWeek0.values()].sort((a, b) =>
-        a.week0.join(',').localeCompare(b.week0.join(','))
-      );
-
-      // Sort continuations within each entry
-      for (const entry of entriesToWrite) {
-        entry.continuations.sort(compareContinuations);
+  // Hash a path to a compact number for deduplication (collision-tolerant since it's for filtering)
+  function hashPath(path) {
+    let hash = 0;
+    for (let w = 0; w < path.length; w++) {
+      const week = path[w];
+      for (let i = 0; i < week.length; i++) {
+        hash = ((hash << 5) - hash + week[i]) | 0;
+        hash = ((hash << 13) ^ hash) | 0;
       }
     }
+    return hash;
+  }
 
-    // Write with prefix compression
-    let lines = [];
-    let prevWeek0 = null;
-    let prevLaterWeeks = null;
+  // Helper: compare two schedule arrays element-by-element
+  function schedulesEqual(a, b) {
+    if (!a || !b) return false;
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
 
-    for (const entry of entriesToWrite) {
-      const week0 = entry.week0;
-      for (const laterWeeks of entry.continuations) {
-        const pathLen = 1 + laterWeeks.length;
+  // MEMORY OPTIMIZATION: Stream writes directly to file instead of accumulating in memory
+  // This function writes a batch of paths to the streaming file
+  function writePathBatch(paths) {
+    if (paths.length === 0) return;
 
-        // Find common prefix depth
-        let commonDepth = 0;
-        if (prevWeek0 !== null) {
-          if (schedulesEqual(week0, prevWeek0)) {
-            commonDepth = 1;
-            const prevLen = 1 + (prevLaterWeeks ? prevLaterWeeks.length : 0);
-            while (commonDepth < prevLen && commonDepth < pathLen) {
-              if (!schedulesEqual(laterWeeks[commonDepth - 1], prevLaterWeeks[commonDepth - 1])) break;
-              commonDepth++;
-            }
-          }
-        }
-
-        // Write nodes from divergence point onwards
-        for (let depth = commonDepth; depth < pathLen; depth++) {
-          const schedule = depth === 0 ? week0 : laterWeeks[depth - 1];
-          lines.push('\t'.repeat(depth) + schedule.join(','));
-        }
-
-        prevWeek0 = week0;
-        prevLaterWeeks = laterWeeks;
-      }
+    if (VALIDATE) {
+      // In validate mode, just count paths without file I/O
+      optimalCount += paths.length;
+      return;
     }
 
-    // Handle in-flight paths
-    for (const inFlightPath of inFlightPaths) {
-      if (!inFlightPath) continue;
+    // Initialize writer on first batch
+    if (!optimalWriter) {
+      optimalWriter = new TreeWriter(saveFile);
+      optimalWriter.writeHeader(N_TEAMS, N_WEEKS, 0);
+      lastWrittenPath = null;
+    }
 
+    // Write each path with prefix compression
+    for (const path of paths) {
+      // Find common prefix with last written path
       let commonDepth = 0;
-      if (prevWeek0 !== null) {
-        const prevPath = [prevWeek0, ...(prevLaterWeeks || [])];
-        while (commonDepth < prevPath.length &&
-               commonDepth < inFlightPath.length &&
-               schedulesEqual(prevPath[commonDepth], inFlightPath[commonDepth])) {
+      if (lastWrittenPath) {
+        while (commonDepth < lastWrittenPath.length &&
+               commonDepth < path.length &&
+               schedulesEqual(lastWrittenPath[commonDepth], path[commonDepth])) {
           commonDepth++;
         }
       }
 
-      for (let depth = commonDepth; depth < inFlightPath.length; depth++) {
-        lines.push('\t'.repeat(depth) + inFlightPath[depth].join(','));
+      // Write nodes from divergence point onwards
+      for (let depth = commonDepth; depth < path.length; depth++) {
+        optimalWriter.writeNode(depth, path[depth]);
       }
-      lines.push('\t'.repeat(inFlightPath.length) + '…');
 
-      prevWeek0 = inFlightPath[0];
-      prevLaterWeeks = inFlightPath.slice(1);
+      lastWrittenPath = path.map(s => Array.from(s));
+      optimalCount++;
+    }
+  }
+
+  // Finalize the streaming file with correct header and handle in-flight paths
+  async function finalizeOptimalFile(isFinal = false, inFlightPaths = []) {
+    if (VALIDATE) return optimalCount;
+    if (!optimalWriter && optimalCount === 0 && inFlightPaths.length === 0) return 0;
+
+    // Write in-flight path markers if any
+    if (optimalWriter && inFlightPaths.length > 0) {
+      for (const inFlightPath of inFlightPaths) {
+        if (!inFlightPath) continue;
+
+        // Find common prefix with last written path
+        let commonDepth = 0;
+        if (lastWrittenPath) {
+          while (commonDepth < lastWrittenPath.length &&
+                 commonDepth < inFlightPath.length &&
+                 schedulesEqual(lastWrittenPath[commonDepth], inFlightPath[commonDepth])) {
+            commonDepth++;
+          }
+        }
+
+        for (let depth = commonDepth; depth < inFlightPath.length; depth++) {
+          optimalWriter.writeNode(depth, inFlightPath[depth]);
+        }
+        optimalWriter.writeIncompleteMarker(inFlightPath.length);
+
+        lastWrittenPath = inFlightPath.map(s => Array.from(s));
+      }
     }
 
-    const isPartial = !isFinal || inFlightPaths.length > 0;
-    const header = `# teams=${N_TEAMS} weeks=${N_WEEKS} score=${globalBestScore.join(',')} count=${totalCount}${isPartial ? ' (partial)' : ''}`;
-    writeFileSync(saveFile, header + '\n' + lines.join('\n') + '\n');
+    if (optimalWriter) {
+      const isPartial = !isFinal || inFlightPaths.length > 0;
+      await optimalWriter.finalize({
+        count: optimalCount,
+        partial: isPartial
+      });
+      optimalWriter = null;
+    }
 
-    return totalCount;
+    return optimalCount;
   }
 
   // Spawn workers and distribute work
@@ -906,46 +948,48 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
     let allPaths = [];
     let totalInputPaths = 0;
 
-    // If resuming, load existing complete paths into allOptimal first
+    // MEMORY OPTIMIZATION: When resuming, we copy existing paths to the streaming temp file
+    // instead of loading them all into memory. We only track hashes for deduplication.
     if (resumeData && priorFile && existsSync(priorFile)) {
-      console.log(`Loading existing complete paths from ${priorFile}...`);
-      const reader = new TreeReader(priorFile);
-      const existingPaths = await reader.readAll();
+      // Verify the resume file has the expected optimal score
+      const resumeScore = resumeData.header.score;
+      if (resumeScore[0] !== TARGET_SCORE[0] || resumeScore[1] !== TARGET_SCORE[1]) {
+        console.log(`Warning: Resume file has score [${resumeScore}] but target is [${TARGET_SCORE}], starting fresh`);
+        // Fall through to use startingPaths
+        allPaths = startingPaths;
+        totalInputPaths = allPaths.length;
+      } else {
+        console.log(`Copying existing complete paths from ${priorFile}...`);
 
-      // Group by week0 for allOptimal structure, and track for deduplication
-      const byWeek0 = new Map();
-      for (const path of existingPaths) {
-        const week0Key = path[0].join(',');
-        if (!byWeek0.has(week0Key)) {
-          byWeek0.set(week0Key, { week0: path[0], continuations: [] });
+        // Stream-copy existing paths to our new temp file and track hashes
+        const reader = new TreeReader(priorFile);
+        let existingCount = 0;
+        let batchPaths = [];
+        const BATCH_SIZE = 10000;
+
+        for await (const path of reader.paths()) {
+          // Track hash for deduplication
+          existingPathHashes.add(hashPath(path));
+          batchPaths.push(path);
+          existingCount++;
+
+          // Write in batches to avoid memory accumulation
+          if (batchPaths.length >= BATCH_SIZE) {
+            writePathBatch(batchPaths);
+            batchPaths = [];
+          }
         }
-        byWeek0.get(week0Key).continuations.push(path.slice(1));
+        // Write remaining
+        if (batchPaths.length > 0) {
+          writePathBatch(batchPaths);
+        }
 
-        // Track for deduplication
-        const fullPathKey = path.map(w => w.join(',')).join('|');
-        existingPathKeys.add(fullPathKey);
+        console.log(`  Copied ${existingCount} existing paths, tracking ${existingPathHashes.size} hashes for dedup`);
+
+        // Use startingPaths which contains incomplete + unprocessed paths
+        allPaths = startingPaths;
+        totalInputPaths = allPaths.length;
       }
-      allOptimal.push(...byWeek0.values());
-
-      // Set global best score from existing data
-      globalBestScore = resumeData.header.score;
-
-      // Check for overlapping complete/incomplete prefixes
-      const incompleteKeys = new Set(resumeData.incompletePrefixes.map(p => p.map(w => w.join(',')).join('|')));
-      let overlaps = 0;
-      for (const path of existingPaths) {
-        const prefixKey = path.slice(0, -1).map(w => w.join(',')).join('|');
-        if (incompleteKeys.has(prefixKey)) overlaps++;
-      }
-      if (overlaps > 0) {
-        console.log(`  Note: ${overlaps} existing paths are under prefixes marked incomplete (will deduplicate)`);
-      }
-
-      console.log(`  Loaded ${existingPaths.length} complete paths with score [${globalBestScore}]`);
-
-      // Use startingPaths which contains incomplete + unprocessed paths
-      allPaths = startingPaths;
-      totalInputPaths = allPaths.length;
     } else if (priorFile && existsSync(priorFile) && !VALIDATE) {
       // Stream from prior results file and collect all paths
       console.log(`Streaming paths from ${priorFile}...`);
@@ -1002,33 +1046,29 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
             totalPathsSoFar += msg.paths - (workerProgress[i] > 10 ? msg.paths : 0); // Approximate
             updateProgress();  // Immediate update on progress change
           } else if (msg.type === 'optimal') {
-            // Incremental optimal result from worker
-            const s = msg.score;
-            if (s[0] < globalBestScore[0] || (s[0] === globalBestScore[0] && s[1] < globalBestScore[1])) {
-              // New best - clear previous (including existing paths from resume)
-              globalBestScore = s;
-              allOptimal.length = 0;
-              existingPathKeys.clear();
-            }
-            if (s[0] === globalBestScore[0] && s[1] === globalBestScore[1]) {
-              // Filter out duplicates when resuming
-              if (existingPathKeys.size > 0) {
-                const week0 = msg.week0;
-                const week0Key = week0.join(',');
-                const filteredContinuations = msg.continuations.filter(laterWeeks => {
-                  const fullPathKey = week0Key + '|' + laterWeeks.map(w => w.join(',')).join('|');
-                  if (existingPathKeys.has(fullPathKey)) {
-                    return false;  // Skip duplicate
-                  }
-                  existingPathKeys.add(fullPathKey);  // Track new path
-                  return true;
-                });
-                if (filteredContinuations.length > 0) {
-                  allOptimal.push({ week0: msg.week0, continuations: filteredContinuations });
+            // OPTIMIZATION: All optimal results have the same pre-computed TARGET_SCORE
+            // Build full paths from worker message
+            const week0 = msg.week0;
+            const pathsToWrite = [];
+
+            for (const laterWeeks of msg.continuations) {
+              const fullPath = [week0, ...laterWeeks];
+
+              // Only deduplicate when resuming (existingPathHashes is populated during resume)
+              // For fresh runs, workers process disjoint starting paths so no duplicates possible
+              if (existingPathHashes.size > 0) {
+                const pathHash = hashPath(fullPath);
+                if (existingPathHashes.has(pathHash)) {
+                  continue;  // Skip duplicate from resume
                 }
-              } else {
-                allOptimal.push({ week0: msg.week0, continuations: msg.continuations });
+                existingPathHashes.add(pathHash);
               }
+
+              pathsToWrite.push(fullPath);
+            }
+
+            if (pathsToWrite.length > 0) {
+              writePathBatch(pathsToWrite);
             }
           } else if (msg.type === 'done') {
             workerProgress[i] = workerTotals[i];
@@ -1081,31 +1121,17 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
       const remaining = totalInputPaths - processed;
       const eta = rate > 0 ? formatDuration(remaining / rate) : '?';
 
-      // Count optimal paths found so far
-      let optimalCount = 0;
-      for (const entry of allOptimal) {
-        optimalCount += entry.continuations.length;
-      }
-
+      // MEMORY OPTIMIZATION: optimalCount is now tracked incrementally
       process.stdout.write(`\r  ${processed}/${totalInputPaths} paths (${pct}%) | ${formatDuration(elapsed)} so far | ${eta} to go | ${optimalCount} optimal${saveInfo}   `);
     }
 
     // Show initial progress immediately
     process.stdout.write(`\r  0/${totalInputPaths} paths (0.0%) | 0s so far | ? to go | 0 optimal   `);
 
-    // Periodic display update and saves (1Hz)
+    // Periodic display update (1Hz) - no periodic saves since streaming writes go directly to disk
+    // Finalization only happens on interrupt (SIGINT/SIGTERM) or completion
     const progressInterval = setInterval(() => {
-      const now = performance.now();
-
-      // Periodic save (include in-flight paths so we can resume if process crashes)
-      if (now - lastSaveTime > SAVE_INTERVAL && allOptimal.length > 0) {
-        const inFlightPaths = workerInFlightPaths.filter(p => p !== null);
-        const count = saveOptimalToFile(false, inFlightPaths);
-        lastSaveTime = now;
-        updateProgress(` | saved ${count}${inFlightPaths.length > 0 ? ` +${inFlightPaths.length}…` : ''}`);
-      } else {
-        updateProgress();
-      }
+      updateProgress();
     }, 1000);  // Update display every 1s
 
     // SIGINT handler for graceful shutdown
@@ -1126,14 +1152,13 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
       const inFlightPaths = workerInFlightPaths.filter(p => p !== null);
       console.log(`  ${inFlightPaths.length} in-flight paths marked as incomplete`);
 
-      // Save with incomplete markers
-      const count = saveOptimalToFile(false, inFlightPaths);
-      const saveFile = `results/${N_TEAMS}teams-${N_WEEKS}week${N_WEEKS > 1 ? 's' : ''}.txt`;
-      console.log(`  Saved ${count} complete paths to ${saveFile}`);
-      console.log(`  Resume with: node schedule-parallel.mjs --teams=${N_TEAMS} --weeks=${N_WEEKS}`);
-
-      clearInterval(progressInterval);
-      process.exit(0);
+      // MEMORY OPTIMIZATION: Finalize the streaming file with in-flight markers
+      finalizeOptimalFile(false, inFlightPaths).then(() => {
+        console.log(`  Saved ${optimalCount} complete paths to ${saveFile}`);
+        console.log(`  Resume with: node calculate.mjs --teams=${N_TEAMS} --weeks=${N_WEEKS}`);
+        clearInterval(progressInterval);
+        process.exit(0);
+      });
     };
     process.on('SIGINT', handleSigint);
     process.on('SIGTERM', handleSigint);  // Also handle SIGTERM (used by timeout, kill, etc.)
@@ -1146,12 +1171,12 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
     return { results, totalInputPaths };
   }
 
-  runWorkers().then(({ results, totalInputPaths }) => {
+  runWorkers().then(async ({ results, totalInputPaths }) => {
     const elapsed = (performance.now() - workerStart) / 1000;
 
     // Aggregate stats from workers
     let totalPaths = 0;
-    let globalBestCount = 0;
+    let workerOptimalCount = 0;
     let globalMinPerPath = Infinity;
     let globalMaxPerPath = 0;
     let globalTotalPerPath = 0;
@@ -1161,31 +1186,24 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
       totalPaths += r.totalPaths;
       totalPathCount += r.pathCount;
       globalTotalPerPath += r.totalPerPath;
-      globalBestCount += r.bestCount;
+      workerOptimalCount += r.optimalCount;
 
       if (r.minPerPath < globalMinPerPath) globalMinPerPath = r.minPerPath;
       if (r.maxPerPath > globalMaxPerPath) globalMaxPerPath = r.maxPerPath;
-    }
-
-    // Count optimal from collected data
-    let optimalCount = 0;
-    for (const entry of allOptimal) {
-      optimalCount += entry.continuations.length;
     }
 
     const avgPerPath = totalPathCount > 0 ? globalTotalPerPath / totalPathCount : 0;
 
     console.log(`\nCompleted in ${elapsed.toFixed(2)}s`);
     console.log(`Total: ${totalPaths} complete ${N_WEEKS}-week schedules`);
-    console.log(`Optimal: ${optimalCount} with total doubleByes=${globalBestScore[0]}, fiveSlotTeams=${globalBestScore[1]}`);
+    console.log(`Optimal: ${optimalCount} with total doubleByes=${TARGET_SCORE[0]}, fiveSlotTeams=${TARGET_SCORE[1]}`);
     console.log(`Input stats: ${totalPathCount} paths, extensions per path: min=${globalMinPerPath}, max=${globalMaxPerPath}, avg=${avgPerPath.toFixed(1)}`);
     console.log(`Throughput: ${(totalPaths / elapsed).toFixed(0)} paths/sec`);
 
-    // Final save of optimal schedules (skip in validate mode)
-    if (allOptimal.length > 0 && !VALIDATE) {
-      const count = saveOptimalToFile(true);
-      const saveFile = `results/${N_TEAMS}teams-${N_WEEKS}week${N_WEEKS > 1 ? 's' : ''}.txt`;
-      console.log(`Saved ${allOptimal.length} week0 groups (${count} total paths) to ${saveFile}`);
+    // MEMORY OPTIMIZATION: Finalize the streaming file (skip in validate mode)
+    if (optimalCount > 0 && !VALIDATE) {
+      await finalizeOptimalFile(true);
+      console.log(`Saved ${optimalCount} optimal paths to ${saveFile}`);
     }
   }).catch((err) => {
     console.error('Worker error:', err);
