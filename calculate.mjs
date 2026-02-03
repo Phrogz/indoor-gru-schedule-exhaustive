@@ -780,7 +780,18 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
     if (allOptimal.length === 0 && inFlightPaths.length === 0) return 0;
     const saveFile = `results/${N_TEAMS}teams-${N_WEEKS}week${N_WEEKS > 1 ? 's' : ''}.txt`;
 
-    // Helper: compare two schedule arrays element-by-element (avoids JSON.stringify)
+    // Count total paths to decide strategy
+    let totalCount = 0;
+    for (const entry of allOptimal) {
+      totalCount += entry.continuations.length;
+    }
+
+    // For large datasets, skip expensive sorting - some prefix duplication is acceptable
+    // Sorting 3M+ paths uses too much memory (consolidation + sort + string comparisons)
+    const SORT_THRESHOLD = 100000;
+    const shouldSort = totalCount < SORT_THRESHOLD;
+
+    // Helper: compare two schedule arrays element-by-element
     const schedulesEqual = (a, b) => {
       if (a.length !== b.length) return false;
       for (let i = 0; i < a.length; i++) {
@@ -789,50 +800,48 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
       return true;
     };
 
-    // Comparator for lexicographic sorting of continuation arrays
-    const compareContinuations = (a, b) => {
-      for (let i = 0; i < Math.min(a.length, b.length); i++) {
-        const cmp = a[i].join(',').localeCompare(b[i].join(','));
-        if (cmp !== 0) return cmp;
-      }
-      return a.length - b.length;
-    };
+    let entriesToWrite = allOptimal;
 
-    // Memory-efficient approach: consolidate by week0, sort in place, write in chunks
-    const byWeek0 = new Map();
-    for (const entry of allOptimal) {
-      const key = entry.week0.join(',');
-      if (!byWeek0.has(key)) {
-        byWeek0.set(key, { week0: entry.week0, continuations: [] });
+    if (shouldSort) {
+      // Comparator for lexicographic sorting of continuation arrays
+      const compareContinuations = (a, b) => {
+        for (let i = 0; i < Math.min(a.length, b.length); i++) {
+          const cmp = a[i].join(',').localeCompare(b[i].join(','));
+          if (cmp !== 0) return cmp;
+        }
+        return a.length - b.length;
+      };
+
+      // Consolidate by week0, sort for optimal prefix compression
+      const byWeek0 = new Map();
+      for (const entry of allOptimal) {
+        const key = entry.week0.join(',');
+        if (!byWeek0.has(key)) {
+          byWeek0.set(key, { week0: entry.week0, continuations: [] });
+        }
+        const target = byWeek0.get(key).continuations;
+        for (const c of entry.continuations) {
+          target.push(c);
+        }
       }
-      // Append without spread (spread blows stack with millions of elements)
-      const target = byWeek0.get(key).continuations;
-      for (const c of entry.continuations) {
-        target.push(c);
+
+      // Sort week0 entries
+      entriesToWrite = [...byWeek0.values()].sort((a, b) =>
+        a.week0.join(',').localeCompare(b.week0.join(','))
+      );
+
+      // Sort continuations within each entry
+      for (const entry of entriesToWrite) {
+        entry.continuations.sort(compareContinuations);
       }
     }
 
-    // Sort week0 entries
-    const sortedEntries = [...byWeek0.values()].sort((a, b) =>
-      a.week0.join(',').localeCompare(b.week0.join(','))
-    );
-
-    // Sort continuations within each entry (in place to save memory)
-    for (const entry of sortedEntries) {
-      entry.continuations.sort(compareContinuations);
-    }
-
-    // Write in chunks to avoid giant lines array
-    const CHUNK_SIZE = 100000;
-    let chunks = [];
-    let currentChunk = [];
-    let totalCount = 0;
-
-    // Track previous path WITHOUT creating new arrays - store references
+    // Write with prefix compression
+    let lines = [];
     let prevWeek0 = null;
     let prevLaterWeeks = null;
 
-    for (const entry of sortedEntries) {
+    for (const entry of entriesToWrite) {
       const week0 = entry.week0;
       for (const laterWeeks of entry.continuations) {
         const pathLen = 1 + laterWeeks.length;
@@ -840,10 +849,8 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
         // Find common prefix depth
         let commonDepth = 0;
         if (prevWeek0 !== null) {
-          // Check week0
           if (schedulesEqual(week0, prevWeek0)) {
             commonDepth = 1;
-            // Check subsequent weeks
             const prevLen = 1 + (prevLaterWeeks ? prevLaterWeeks.length : 0);
             while (commonDepth < prevLen && commonDepth < pathLen) {
               if (!schedulesEqual(laterWeeks[commonDepth - 1], prevLaterWeeks[commonDepth - 1])) break;
@@ -855,23 +862,15 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
         // Write nodes from divergence point onwards
         for (let depth = commonDepth; depth < pathLen; depth++) {
           const schedule = depth === 0 ? week0 : laterWeeks[depth - 1];
-          currentChunk.push('\t'.repeat(depth) + schedule.join(','));
+          lines.push('\t'.repeat(depth) + schedule.join(','));
         }
 
-        // Store references (no new arrays created)
         prevWeek0 = week0;
         prevLaterWeeks = laterWeeks;
-        totalCount++;
-
-        // Flush chunk if large enough
-        if (currentChunk.length >= CHUNK_SIZE) {
-          chunks.push(currentChunk.join('\n'));
-          currentChunk = [];
-        }
       }
     }
 
-    // Handle in-flight paths (small number, no optimization needed)
+    // Handle in-flight paths
     for (const inFlightPath of inFlightPaths) {
       if (!inFlightPath) continue;
 
@@ -886,22 +885,17 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
       }
 
       for (let depth = commonDepth; depth < inFlightPath.length; depth++) {
-        currentChunk.push('\t'.repeat(depth) + inFlightPath[depth].join(','));
+        lines.push('\t'.repeat(depth) + inFlightPath[depth].join(','));
       }
-      currentChunk.push('\t'.repeat(inFlightPath.length) + '…');
+      lines.push('\t'.repeat(inFlightPath.length) + '…');
 
       prevWeek0 = inFlightPath[0];
       prevLaterWeeks = inFlightPath.slice(1);
     }
 
-    // Flush remaining
-    if (currentChunk.length > 0) {
-      chunks.push(currentChunk.join('\n'));
-    }
-
     const isPartial = !isFinal || inFlightPaths.length > 0;
     const header = `# teams=${N_TEAMS} weeks=${N_WEEKS} score=${globalBestScore.join(',')} count=${totalCount}${isPartial ? ' (partial)' : ''}`;
-    writeFileSync(saveFile, header + '\n' + chunks.join('\n') + '\n');
+    writeFileSync(saveFile, header + '\n' + lines.join('\n') + '\n');
 
     return totalCount;
   }
