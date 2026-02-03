@@ -45,18 +45,22 @@ const stack = [{ children: data, depth: -1 }];
 for (let i = 1; i < lines.length; i++) {
 	const line = lines[i];
 	if (!line.trim()) continue;
-	
+
 	// Count leading tabs
 	let depth = 0;
 	while (depth < line.length && line[depth] === '\t') depth++;
-	
-	const schedule = line.trim().split(',').map(Number);
-	
+
+	// Skip incomplete markers
+	const content = line.trim();
+	if (content === '…') continue;
+
+	const schedule = content.split(',').map(Number);
+
 	// Pop stack until we find parent
 	while (stack.length > 1 && stack[stack.length - 1].depth >= depth) {
 		stack.pop();
 	}
-	
+
 	const parent = stack[stack.length - 1];
 	const node = [schedule, []];
 	parent.children.push(node);
@@ -132,26 +136,39 @@ function isLeafNode(item) {
 }
 
 // Flatten tree into array of complete schedules (paths from root to leaves)
-function flattenTree(node, path = []) {
-	if (isLeafNode(node)) {
-		// Leaf: [schedule] with no children
-		return [path.concat([node[0]])];
-	}
-	// Internal: [schedule, children]
-	const [schedule, children] = node;
-	const newPath = path.concat([schedule]);
+// Uses iterative approach to avoid stack overflow on large trees
+function flattenTree(roots) {
 	const results = [];
-	for (const child of children) {
-		results.push(...flattenTree(child, newPath));
+	// Stack of {node, pathSoFar}
+	const stack = [];
+
+	// Initialize with root nodes
+	for (let i = roots.length - 1; i >= 0; i--) {
+		stack.push({ node: roots[i], path: [] });
 	}
+
+	while (stack.length > 0) {
+		const { node, path } = stack.pop();
+
+		if (isLeafNode(node)) {
+			// Leaf: [schedule] with no children
+			results.push(path.concat([node[0]]));
+		} else {
+			// Internal: [schedule, children]
+			const [schedule, children] = node;
+			const newPath = path.concat([schedule]);
+			// Push children in reverse order so we process them in order
+			for (let i = children.length - 1; i >= 0; i--) {
+				stack.push({ node: children[i], path: newPath });
+			}
+		}
+	}
+
 	return results;
 }
 
 // Parse schedules from data
-const schedules = [];
-for (const rootNode of data) {
-	schedules.push(...flattenTree(rootNode));
-}
+const schedules = flattenTree(data);
 
 // Display header info
 console.log(`File: ${file}`);
