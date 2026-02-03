@@ -16,13 +16,11 @@ async function parseHeader(filePath) {
   const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity });
   for await (const line of rl) {
     if (line.startsWith('#')) {
-      const result = { teams: 0, weeks: 0, score: [0, 0], count: 0 };
+      const result = { teams: 0, weeks: 0, count: 0 };
       const teamsMatch = line.match(/teams=(\d+)/);
       if (teamsMatch) result.teams = parseInt(teamsMatch[1], 10);
       const weeksMatch = line.match(/weeks=(\d+)/);
       if (weeksMatch) result.weeks = parseInt(weeksMatch[1], 10);
-      const scoreMatch = line.match(/score=(\d+),(\d+)/);
-      if (scoreMatch) result.score = [parseInt(scoreMatch[1], 10), parseInt(scoreMatch[2], 10)];
       const countMatch = line.match(/count=(\d+)/);
       if (countMatch) result.count = parseInt(countMatch[1], 10);
       rl.close();
@@ -215,7 +213,7 @@ function validateRoundRobin(weeks, nTeams) {
 async function validate() {
   const header = await parseHeader(filePath);
   console.log(`Validating: ${filePath}`);
-  console.log(`  Teams: ${header.teams}, Weeks: ${header.weeks}, Expected count: ${header.count}, Expected score: [${header.score}]`);
+  console.log(`  Teams: ${header.teams}, Weeks: ${header.weeks}, Expected count: ${header.count}`);
 
   const nTeams = header.teams;
   const nWeeks = header.weeks;

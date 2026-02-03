@@ -29,7 +29,7 @@ if (!file) {
 const content = readFileSync(resolve(file), 'utf-8');
 const lines = content.split('\n');
 
-// Parse header: # teams=N weeks=W score=X,Y count=Z
+// Parse header: # teams=N weeks=W count=Z
 const header = lines[0];
 const headerMatch = header.match(/^#\s*teams=(\d+)\s+weeks=(\d+)/);
 if (!headerMatch) {

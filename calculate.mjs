@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from 'fs';
 import { createReadStream } from 'fs';
 import { createInterface } from 'readline';
-import { TreeWriter, TreeReader, parseHeader } from './lib/tree-format.mjs';
+import { TreeWriter, TreeReader, parseHeader, readHeaderFromFile } from './lib/tree-format.mjs';
 
 // Parse command-line args (only used in main thread)
 function parseArgs() {
@@ -25,6 +25,7 @@ Options:
   --teams=N     Number of teams (must be even, 4-16, default: 8)
   --weeks=N     Number of weeks to generate (default: 2)
   --workers=N   Number of worker threads (default: ${defaultWorkers}, which is cpus-2)
+  --breadth=N   Results per path per round in breadth-first mode (default: 32)
   --validate    Run without reading/writing files (test enumeration only)
   --debug       Enable verbose logging
   --help, -h    Show this help message
@@ -33,6 +34,7 @@ Examples:
   node schedule-parallel.mjs --teams=6 --weeks=3
   node schedule-parallel.mjs --teams=8 --weeks=4 --workers=8
   node schedule-parallel.mjs --teams=6 --weeks=5 --validate
+  node schedule-parallel.mjs --teams=8 --weeks=5 --breadth=100  # Quick stats run
 
 Output files are saved to results/{N}teams-{W}week(s).txt
 Prior results are automatically loaded to resume from the best available checkpoint.
@@ -42,15 +44,16 @@ Prior results are automatically loaded to resume from the best available checkpo
 
   // Default to leaving 2 cores free for OS responsiveness (minimum 1 worker)
   const defaultWorkers = Math.max(1, cpus().length - 2);
-  let teams = 8, weeks = 2, debug = false, workers = defaultWorkers, validate = false;
+  let teams = 8, weeks = 2, debug = false, workers = defaultWorkers, validate = false, breadth = 32;
   for (const arg of args) {
     if (arg.startsWith('--teams=')) teams = parseInt(arg.slice(8));
     else if (arg.startsWith('--weeks=')) weeks = parseInt(arg.slice(8));
     else if (arg.startsWith('--workers=')) workers = parseInt(arg.slice(10));
+    else if (arg.startsWith('--breadth=')) breadth = parseInt(arg.slice(10));
     else if (arg === '--debug') debug = true;
     else if (arg === '--validate') validate = true;
   }
-  return { teams, weeks, debug, workers, validate };
+  return { teams, weeks, debug, workers, validate, breadth };
 }
 
 // Get config from workerData in worker threads, parseArgs in main thread
@@ -59,7 +62,8 @@ const CONFIG = isMainThread ? parseArgs() : {
   weeks: workerData.numWeeks,
   debug: false,
   workers: 1,
-  validate: false
+  validate: false,
+  breadth: workerData.breadth || 0
 };
 
 // Teams encoded as indices 0 to N-1
@@ -68,9 +72,30 @@ const N_WEEKS = CONFIG.weeks;
 const DEBUG = CONFIG.debug;
 const N_WORKERS = CONFIG.workers;
 const VALIDATE = CONFIG.validate;
+const BREADTH = CONFIG.breadth;  // 0 = unlimited, >0 = stop after this many optimal paths per worker
 const TEAMS = 'ABCDEFGHIJKLMNOP'.slice(0, N_TEAMS).split('');
 const N_SLOTS = (N_TEAMS * 3) / 2;
 const N_MATCHUPS = (N_TEAMS * (N_TEAMS - 1)) / 2;
+
+// Experimentally-determined average continuations per input path, by team count and target week
+// Used to estimate total optimal schedules for progress display
+// Format: CONTINUATION_MULTIPLIERS[teams][targetWeek] = average continuations
+const CONTINUATION_MULTIPLIERS = {
+  6: {
+    2: 36,       // Week 2 continuations per week 1
+    3: 96,       // Week 3 continuations per week 2
+    4: 192,      // Week 4 continuations per week 3
+    5: 12,       // Week 5 continuations per week 4
+    6: 720,      // Week 6 continuations per week 5
+  },
+  8: {
+    2: 32,       // Week 2 continuations per week 1
+    3: 32,       // Week 3 continuations per week 2
+    4: 81944.69, // Week 4 continuations per week 3
+    5: 22.73,    // Week 5 continuations per week 4
+    6: 201600,   // Week 6 continuations per week 5
+  }
+};
 
 // Precompute matchup encoding/decoding
 const matchupToTeams = new Uint8Array(N_MATCHUPS * 2);
@@ -408,13 +433,7 @@ function updateRoundMatchups(weekNum, weekMatchups, roundMatchups, requiredMatch
 
 // Worker thread logic
 if (!isMainThread) {
-  const { inputPaths, startWeek, numWeeks, nTeams, nSlots, nMatchups } = workerData;
-
-  let totalPaths = 0;
-  let optimalCount = 0;
-  let minPerPath = Infinity;
-  let maxPerPath = 0;
-  let totalPerPath = 0;
+  const { startWeek, numWeeks, nTeams, nSlots, nMatchups } = workerData;
 
   // OPTIMIZATION: Pre-computed optimal score (2 doubleByes, 4 fiveSlotTeams per week)
   const TARGET_SCORE = [2 * numWeeks, 4 * numWeeks];
@@ -422,9 +441,6 @@ if (!isMainThread) {
   // MEMORY OPTIMIZATION: Store continuations as packed Uint8Arrays
   // Each continuation is (numWeeks - 1) weeks × nSlots bytes
   const CONTINUATION_SIZE = (numWeeks - 1) * nSlots;
-  let currentWeek0Key = null;
-  // Store as array of Uint8Arrays (each is a packed continuation)
-  let currentWeek0Optimal = [];
 
   // Pack weeks 1..N into a single Uint8Array
   function packContinuation(weeks) {
@@ -508,34 +524,51 @@ if (!isMainThread) {
   // OPTIMIZATION: Optimal score per week is always [2,4]
   const OPTIMAL_WEEK_SCORE = [2, 4];
 
-  // MEMORY OPTIMIZATION: Flush accumulated results every N paths to prevent heap exhaustion
-  const FLUSH_THRESHOLD = 10000;
+  // State for processing a single work unit
+  let optimalCount = 0;
+  let skipOffset = 0;
+  let breadthLimit = 0;
+  let breadthReached = false;
+  let currentWeek0Optimal = [];
+
+  // Flush results frequently to show progress - use breadth limit or 100, whichever is smaller
+  const FLUSH_THRESHOLD = 100;
 
   function flushOptimalIfNeeded(week0, force = false) {
     if (currentWeek0Optimal.length >= FLUSH_THRESHOLD || (force && currentWeek0Optimal.length > 0)) {
-      const BATCH_SIZE = 10000;
-      for (let i = 0; i < currentWeek0Optimal.length; i += BATCH_SIZE) {
-        const batch = currentWeek0Optimal.slice(i, i + BATCH_SIZE);
-        parentPort.postMessage({
-          type: 'optimal',
-          week0: Array.from(week0),
-          continuations: batch.map(unpackContinuation),
-          score: TARGET_SCORE,
-          count: batch.length
-        });
-      }
+      parentPort.postMessage({
+        type: 'optimal',
+        week0: Array.from(week0),
+        continuations: currentWeek0Optimal.map(unpackContinuation),
+        score: TARGET_SCORE,
+        count: currentWeek0Optimal.length
+      });
       currentWeek0Optimal = [];
     }
   }
 
   function enumerateFromPath(week0, weekNum, roundMatchups, weeks) {
+    // Check if we've collected enough for this breadth chunk
+    if (breadthReached) return;
+
     if (weekNum === numWeeks) {
       // All weeks passed the [2,4] check, so this is optimal
-      totalPaths++;
       optimalCount++;
+
+      // Skip results we've already found in previous rounds
+      if (optimalCount <= skipOffset) {
+        return;  // Already found this one, skip it
+      }
+
       currentWeek0Optimal.push(packContinuation(weeks));
       // Flush periodically to prevent memory buildup
       flushOptimalIfNeeded(week0);
+
+      // Check breadth limit (counting only NEW results, not skipped ones)
+      const newResultsFound = optimalCount - skipOffset;
+      if (breadthLimit > 0 && newResultsFound >= breadthLimit) {
+        breadthReached = true;
+      }
       return;
     }
 
@@ -546,10 +579,12 @@ if (!isMainThread) {
       excludeMatchups,
       requiredMatchups,
       onSchedule: (sched) => {
+        // Check if we've collected enough for this breadth chunk
+        if (breadthReached) return;
+
         // OPTIMIZATION: Check this week's score immediately, skip if not optimal
         const score = scoreSchedule(sched);
         if (score.doubleByes !== OPTIMAL_WEEK_SCORE[0] || score.fiveSlotTeams !== OPTIMAL_WEEK_SCORE[1]) {
-          totalPaths++;  // Still count as explored
           return;  // Prune this branch
         }
 
@@ -561,16 +596,16 @@ if (!isMainThread) {
     });
   }
 
-  let processedCount = 0;
-  for (const inputPath of inputPaths) {
-    const week0 = inputPath[0];
-    const week0Key = week0.join(',');
-    currentWeek0Key = week0Key;
+  // Process a single work unit (one input path with skipOffset and breadth)
+  function processWorkUnit(inputPath, skip, breadth) {
+    // Reset state for this work unit
+    optimalCount = 0;
+    skipOffset = skip;
+    breadthLimit = breadth;
+    breadthReached = false;
     currentWeek0Optimal = [];
-    const pathsBefore = totalPaths;
 
-    // Notify main thread we're starting a new input path
-    parentPort.postMessage({ type: 'startPath', path: inputPath.map(w => Array.from(w)) });
+    const week0 = inputPath[0];
 
     // Convert input path to Uint8Arrays
     const weeks = inputPath.map(w => new Uint8Array(w));
@@ -581,34 +616,49 @@ if (!isMainThread) {
     // Continue enumeration from where the input path left off
     enumerateFromPath(week0, startWeek, roundMatchups, weeks);
 
-    // Flush any remaining optimal paths for this week0
+    // Flush any remaining optimal paths
     flushOptimalIfNeeded(week0, true);
 
-    const pathsForThisInput = totalPaths - pathsBefore;
-    if (pathsForThisInput < minPerPath) minPerPath = pathsForThisInput;
-    if (pathsForThisInput > maxPerPath) maxPerPath = pathsForThisInput;
-    totalPerPath += pathsForThisInput;
-    processedCount++;
+    // Return results
+    const newResultsFound = optimalCount - skipOffset;
+    const isComplete = !breadthReached;  // If we didn't hit breadth, we found everything
 
-    // Send progress update after each input path
-    parentPort.postMessage({ type: 'progress', processed: processedCount, total: inputPaths.length, paths: totalPaths });
+    return {
+      totalFound: optimalCount,  // Total optimal paths found (including skipped)
+      newResults: newResultsFound,  // New results found this round
+      isComplete
+    };
   }
 
-  parentPort.postMessage({ type: 'done',
-    totalPaths,
-    optimalCount,
-    pathCount: inputPaths.length,
-    minPerPath,
-    maxPerPath,
-    totalPerPath
+  // Message-based work loop: wait for work assignments from main thread
+  parentPort.on('message', (msg) => {
+    if (msg.type === 'work') {
+      const { inputPath, pathIndex, skipOffset: skip, breadth } = msg;
+
+      const result = processWorkUnit(inputPath, skip, breadth);
+
+      parentPort.postMessage({
+        type: 'result',
+        pathIndex,
+        totalFound: result.totalFound,
+        newResults: result.newResults,
+        isComplete: result.isComplete
+      });
+    } else if (msg.type === 'done') {
+      // No more work, exit cleanly
+      process.exit(0);
+    }
   });
+
+  // Signal ready to receive work
+  parentPort.postMessage({ type: 'ready' });
 }
 
 // Main thread logic
 if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
   console.log('Parallel Tournament Schedule Generator' + (VALIDATE ? ' [VALIDATE MODE]' : ''));
   console.log(`Teams: ${N_TEAMS} (${TEAMS.join('')}), Slots: ${N_SLOTS}, Matchups: ${N_MATCHUPS}, Patterns: ${N_PATTERNS}`);
-  console.log(`Weeks: ${N_WEEKS}, Workers: ${N_WORKERS}`);
+  console.log(`Weeks: ${N_WEEKS}, Workers: ${N_WORKERS}, Breadth: ${BREADTH}`);
 
   if (N_WEEKS < 1) {
     console.log('--weeks must be at least 1');
@@ -684,8 +734,8 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
     const currentFile = `results/${N_TEAMS}teams-${N_WEEKS}week${N_WEEKS > 1 ? 's' : ''}.txt`;
     if (!existsSync(currentFile)) return null;
 
-    const headerLine = readFileSync(currentFile, 'utf8').split('\n')[0];
-    const header = parseHeader(headerLine);
+    // Stream header to handle large files
+    const header = await readHeaderFromFile(currentFile);
 
     // Only resume if file is partial and at same depth
     if (!header.partial || header.weeks !== N_WEEKS) return null;
@@ -700,7 +750,6 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
   let priorFile = null;
   let startingPaths = null;  // Array of paths to extend, or null to generate from scratch
   let startingWeeks = 0;     // Number of weeks already computed in startingPaths
-  let priorScore = null;
   let resumeData = null;     // Data for resuming from partial file at same depth
 
   // First check if we're resuming from a partial file at the same depth
@@ -714,7 +763,7 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
   // Handle resume from partial file at same depth
   if (resumeData) {
     console.log(`\nResuming from partial file: ${resumeData.file}`);
-    console.log(`  Score: [${resumeData.header.score}], ${resumeData.header.count} complete paths`);
+    console.log(`  ${resumeData.header.count} complete paths`);
     console.log(`  ${resumeData.incompletePrefixes.length} incomplete branches (in-flight when interrupted)`);
     console.log(`  ${resumeData.completedPrefixes.size} source paths fully explored`);
 
@@ -729,38 +778,43 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
       process.exit(1);
     }
 
-    // Load source paths and filter out completed ones
-    console.log(`  Loading source paths from ${sourceFile}...`);
-    const sourceReader = new TreeReader(sourceFile);
-    const allSourcePaths = await sourceReader.readAll();
-    console.log(`  ${allSourcePaths.length} total source paths`);
+    // MEMORY OPTIMIZATION: Don't load paths into memory
+    // Workers will stream through source file and skip completed/incomplete paths
+    const sourceHeader = await readHeaderFromFile(sourceFile);
+    const totalSourcePaths = sourceHeader.count;
 
-    // Filter to unprocessed paths (not in completedPrefixes and not in incompletePrefixes)
+    // Build set of keys for incomplete prefixes (small - 4 in example)
     const incompleteKeys = new Set(
       resumeData.incompletePrefixes.map(p => p.map(s => s.join(',')).join('|'))
     );
-    const unprocessedPaths = allSourcePaths.filter(path => {
-      const key = path.map(s => s.join(',')).join('|');
-      return !resumeData.completedPrefixes.has(key) && !incompleteKeys.has(key);
-    });
 
-    console.log(`  ${unprocessedPaths.length} unprocessed paths to explore`);
+    const skippedCount = resumeData.completedPrefixes.size + incompleteKeys.size;
+    const unprocessedCount = totalSourcePaths - skippedCount;
 
-    // Combine: incomplete prefixes first (resume in-flight), then unprocessed
-    startingPaths = [...resumeData.incompletePrefixes, ...unprocessedPaths];
+    console.log(`  ${totalSourcePaths} total source paths`);
+    console.log(`  ${resumeData.completedPrefixes.size} completed, ${incompleteKeys.size} incomplete (will resume)`);
+    console.log(`  ${unprocessedCount} unprocessed paths to explore`);
+
+    // For resume: incomplete prefixes go to startingPaths (small, in-memory)
+    // Unprocessed paths will be streamed by workers, skipping completed/incomplete
+    startingPaths = resumeData.incompletePrefixes;  // Small array, safe in memory
     startingWeeks = sourceWeeks;
-    priorScore = resumeData.header.score;
     priorFile = resumeData.file;  // Will reload complete paths from this in runWorkers
+
+    // Store resume info for worker distribution - pass small skip sets, not huge path arrays
+    resumeData.sourceFile = sourceFile;
+    resumeData.totalSourcePaths = totalSourcePaths;
+    // Convert completedPrefixes Set to Array for passing to workers
+    resumeData.completedKeys = Array.from(resumeData.completedPrefixes);
+    resumeData.incompleteKeys = Array.from(incompleteKeys);
   } else if (bestPrior && bestPrior.weeks > 1) {
     priorFile = bestPrior.file;
     startingWeeks = bestPrior.weeks;
     console.log(`\nFound prior results: ${priorFile}`);
 
-    // Read header to get score
-    const headerLine = readFileSync(priorFile, 'utf8').split('\n')[0];
-    const header = parseHeader(headerLine);
-    priorScore = header.score;
-    console.log(`Prior results: ${header.count} paths with score [${priorScore}]`);
+    // Read header to get count (streaming to handle large files)
+    const header = await readHeaderFromFile(priorFile);
+    console.log(`Prior results: ${header.count} paths`);
   } else if (bestPrior && bestPrior.weeks === 1) {
     // Load single-week schedules
     console.log(`\nLoading 1-week schedules from ${week1File}...`);
@@ -770,11 +824,7 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
     startingPaths = lines.map(line => [line.split(',').map(Number)]);
     startingWeeks = 1;
 
-    if (startingPaths.length > 0) {
-      const s = scoreSchedule(startingPaths[0][0]);
-      priorScore = [s.doubleByes, s.fiveSlotTeams];
-    }
-    console.log(`Loaded ${startingPaths.length} schedules (score=${priorScore}) in ${((performance.now() - start) / 1000).toFixed(2)}s`);
+    console.log(`Loaded ${startingPaths.length} schedules in ${((performance.now() - start) / 1000).toFixed(2)}s`);
   } else {
     // Generate week 1 from scratch
     console.log('\nGenerating 1-week schedules...');
@@ -801,9 +851,8 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
 
     startingPaths = optimal;
     startingWeeks = 1;
-    priorScore = bestScore;
 
-    console.log(`Found ${allWeek1.length} total, ${optimal.length} optimal (score=${bestScore}) in ${((performance.now() - start) / 1000).toFixed(2)}s`);
+    console.log(`Found ${allWeek1.length} total, ${optimal.length} optimal in ${((performance.now() - start) / 1000).toFixed(2)}s`);
 
     // Save 1-week schedules
     if (!VALIDATE) {
@@ -817,7 +866,7 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
   // For single-week mode, we're done
   if (N_WEEKS === 1) {
     const count = startingPaths ? startingPaths.length : 0;
-    console.log(`\nDone. ${count} optimal single-week schedules with score [${priorScore}]`);
+    console.log(`\nDone. ${count} optimal single-week schedules`);
     process.exit(0);
   }
 
@@ -942,90 +991,222 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
     return optimalCount;
   }
 
-  // Spawn workers and distribute work
-  // Workers receive paths and starting week number
+  // Format duration for human readability
+  function formatDuration(seconds) {
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    if (seconds < 3600) {
+      const m = Math.floor(seconds / 60);
+      const s = Math.round(seconds % 60);
+      return `${m}:${s.toString().padStart(2, '0')} minutes`;
+    }
+    if (seconds < 86400) {
+      const h = Math.floor(seconds / 3600);
+      const m = Math.round((seconds % 3600) / 60);
+      return `${h}:${m.toString().padStart(2, '0')} hours`;
+    }
+    if (seconds < 86400 * 14) {
+      const d = Math.floor(seconds / 86400);
+      const h = Math.floor((seconds % 86400) / 3600);
+      const m = Math.round((seconds % 3600) / 60);
+      return `${d}d ${h}:${m.toString().padStart(2, '0')}`;
+    }
+    if (seconds < 86400 * 365) {
+      const weeks = seconds / (86400 * 7);
+      return `${weeks.toFixed(1)} weeks`;
+    }
+    const years = Math.floor(seconds / (86400 * 365));
+    const weeks = Math.round((seconds % (86400 * 365)) / (86400 * 7));
+    return `${years}y ${weeks}w`;
+  }
+
+  // Spawn workers and run with round-robin work distribution
   async function runWorkers() {
-    let allPaths = [];
+    // ========================================================================
+    // STEP 1: Determine input source and total path count
+    // ========================================================================
+    let sourceFile = null;      // File to stream from (null = use in-memory paths)
+    let inMemoryPaths = null;   // In-memory paths (for small datasets or resume incomplete)
     let totalInputPaths = 0;
 
-    // MEMORY OPTIMIZATION: When resuming, we copy existing paths to the streaming temp file
-    // instead of loading them all into memory. We only track hashes for deduplication.
     if (resumeData && priorFile && existsSync(priorFile)) {
-      // Verify the resume file has the expected optimal score
-      const resumeScore = resumeData.header.score;
-      if (resumeScore[0] !== TARGET_SCORE[0] || resumeScore[1] !== TARGET_SCORE[1]) {
-        console.log(`Warning: Resume file has score [${resumeScore}] but target is [${TARGET_SCORE}], starting fresh`);
-        // Fall through to use startingPaths
-        allPaths = startingPaths;
-        totalInputPaths = allPaths.length;
-      } else {
-        console.log(`Copying existing complete paths from ${priorFile}...`);
+      // Resume mode: copy existing results and use startingPaths
+      console.log(`Copying existing complete paths from ${priorFile}...`);
+      const reader = new TreeReader(priorFile);
+      let existingCount = 0;
+      let batchPaths = [];
+      const BATCH_SIZE = 10000;
 
-        // Stream-copy existing paths to our new temp file and track hashes
-        const reader = new TreeReader(priorFile);
-        let existingCount = 0;
-        let batchPaths = [];
-        const BATCH_SIZE = 10000;
-
-        for await (const path of reader.paths()) {
-          // Track hash for deduplication
-          existingPathHashes.add(hashPath(path));
-          batchPaths.push(path);
-          existingCount++;
-
-          // Write in batches to avoid memory accumulation
-          if (batchPaths.length >= BATCH_SIZE) {
-            writePathBatch(batchPaths);
-            batchPaths = [];
-          }
-        }
-        // Write remaining
-        if (batchPaths.length > 0) {
+      for await (const path of reader.paths()) {
+        existingPathHashes.add(hashPath(path));
+        batchPaths.push(path);
+        existingCount++;
+        if (batchPaths.length >= BATCH_SIZE) {
           writePathBatch(batchPaths);
+          batchPaths = [];
         }
-
-        console.log(`  Copied ${existingCount} existing paths, tracking ${existingPathHashes.size} hashes for dedup`);
-
-        // Use startingPaths which contains incomplete + unprocessed paths
-        allPaths = startingPaths;
-        totalInputPaths = allPaths.length;
       }
+      if (batchPaths.length > 0) {
+        writePathBatch(batchPaths);
+      }
+      console.log(`  Copied ${existingCount} existing paths`);
+      inMemoryPaths = startingPaths || [];
+      totalInputPaths = inMemoryPaths.length;
     } else if (priorFile && existsSync(priorFile) && !VALIDATE) {
-      // Stream from prior results file and collect all paths
-      console.log(`Streaming paths from ${priorFile}...`);
-
-      for await (const { chunk, header } of streamPathsFromFile(priorFile, 1000)) {
-        allPaths.push(...chunk);
-        totalInputPaths += chunk.length;
-      }
+      // Stream from prior results file (don't load into memory)
+      const header = await readHeaderFromFile(priorFile);
+      sourceFile = priorFile;
+      totalInputPaths = header.count;
+      console.log(`  Streaming from ${priorFile} (${totalInputPaths} paths)`);
     } else if (startingPaths) {
-      // Use in-memory paths
-      allPaths = startingPaths;
+      inMemoryPaths = startingPaths;
       totalInputPaths = startingPaths.length;
     }
 
-    // Distribute paths across N_WORKERS chunks
-    const chunks = [];
-    const chunkSize = Math.ceil(allPaths.length / N_WORKERS);
-    for (let i = 0; i < allPaths.length; i += chunkSize) {
-      chunks.push(allPaths.slice(i, i + chunkSize));
+    if (totalInputPaths === 0) {
+      console.log('No input paths to process');
+      return { totalInputPaths: 0 };
     }
 
-    console.log(`Distributing ${totalInputPaths} paths across ${chunks.length} workers...`);
+    // ========================================================================
+    // STEP 2: Initialize work queue state
+    // ========================================================================
+    // Track state for each input path
+    const foundCounts = new Array(totalInputPaths).fill(0);  // How many optimal found per path
+    const isComplete = new Array(totalInputPaths).fill(false);  // Whether path is fully explored
+    const incompletePathsMap = new Map();  // Store incomplete paths by index (for streaming mode)
+    let currentRound = 0;   // Which "round" of breadth exploration we're on
 
-    const workerProgress = new Array(chunks.length).fill(0);
-    const workerTotals = chunks.map(c => c.length);
+    // For streaming: we iterate through the file, yielding work units
+    // When round ends, we re-stream from beginning for incomplete paths
+    let pathIterator = null;
+    let currentPathIndex = 0;
+    let roundComplete = false;
 
-    // Track in-flight paths per worker for graceful shutdown
-    const workerInFlightPaths = new Array(chunks.length).fill(null);
-    const workerInstances = [];  // Store worker instances for termination
+    async function* createPathIterator() {
+      if (inMemoryPaths) {
+        for (let i = 0; i < inMemoryPaths.length; i++) {
+          yield { index: i, path: inMemoryPaths[i] };
+        }
+      } else {
+        const reader = new TreeReader(sourceFile);
+        let idx = 0;
+        for await (const path of reader.paths()) {
+          yield { index: idx++, path };
+        }
+      }
+    }
+
+    // Get next work unit (round-robin across incomplete paths)
+    // Returns null when current round is exhausted; caller should check roundComplete
+    async function getNextWork() {
+      while (true) {
+        if (!pathIterator) {
+          pathIterator = createPathIterator();
+          currentPathIndex = 0;
+          roundComplete = false;
+        }
+
+        const next = await pathIterator.next();
+        if (next.done) {
+          // End of current round
+          pathIterator = null;
+          roundComplete = true;
+
+          // Check if any paths still incomplete
+          const hasIncomplete = isComplete.some(c => !c);
+          if (hasIncomplete) {
+            currentRound++;
+            // Start new round - caller will call getNextWork again
+            pathIterator = createPathIterator();
+            currentPathIndex = 0;
+            roundComplete = false;
+            continue;  // Try again with new iterator
+          } else {
+            return null;  // All done
+          }
+        }
+
+        const { index, path } = next.value;
+        currentPathIndex = index;
+
+        if (!isComplete[index]) {
+          return {
+            pathIndex: index,
+            inputPath: path,
+            skipOffset: foundCounts[index],
+            breadth: BREADTH
+          };
+        }
+        // Path already complete, continue to next
+      }
+    }
+
+    // ========================================================================
+    // STEP 3: Estimate total optimal schedules
+    // ========================================================================
+    const multipliers = CONTINUATION_MULTIPLIERS[N_TEAMS];
+    const multiplier = multipliers ? multipliers[N_WEEKS] : null;
+    const estimatedTotalOptimal = multiplier
+      ? Math.round(totalInputPaths * multiplier)
+      : null;
+
+    if (estimatedTotalOptimal) {
+      console.log(`Estimated total optimal schedules: ~${estimatedTotalOptimal.toLocaleString()} (based on ${multiplier.toLocaleString()} continuations/path)`);
+    } else {
+      console.log(`No continuation multiplier known for ${N_TEAMS} teams, week ${N_WEEKS}`);
+    }
+
+    console.log(`Breadth-first: ${BREADTH} results per path per round`);
+
+    // ========================================================================
+    // STEP 4: Create workers and set up message handling
+    // ========================================================================
+    const workerInstances = [];
+    const workerCurrentPath = new Array(N_WORKERS).fill(null);  // Track current work per worker
+    let workersFinished = 0;
     let shuttingDown = false;
+    let pathsProcessed = 0;
 
-    const workers = chunks.map((chunk, i) => {
-      return new Promise((resolve, reject) => {
+    // Progress display
+    function updateProgress(saveInfo = '') {
+      const now = performance.now();
+      const elapsed = (now - workerStart) / 1000;
+      const completedPaths = isComplete.filter(c => c).length;
+
+      let pct, eta, progressStr;
+      if (estimatedTotalOptimal) {
+        // Always show progress against estimated total
+        pct = ((optimalCount / estimatedTotalOptimal) * 100).toFixed(1);
+        const optimalRate = optimalCount / elapsed;
+        const remainingOptimal = estimatedTotalOptimal - optimalCount;
+        eta = optimalRate > 0 ? formatDuration(remainingOptimal / optimalRate) : '?';
+        progressStr = `${optimalCount.toLocaleString()}/~${estimatedTotalOptimal.toLocaleString()} (${pct}%)`;
+      } else {
+        pct = ((completedPaths / totalInputPaths) * 100).toFixed(1);
+        const rate = completedPaths / elapsed;
+        const remaining = totalInputPaths - completedPaths;
+        eta = rate > 0 ? formatDuration(remaining / rate) : '?';
+        progressStr = `${completedPaths}/${totalInputPaths} paths (${pct}%) | ${optimalCount} optimal`;
+      }
+
+      progressStr += ` | round ${currentRound + 1}`;
+
+      process.stdout.write(`\r  ${progressStr} | ${formatDuration(elapsed)} elapsed | ${eta} remaining${saveInfo}   `);
+    }
+
+    // Show initial progress
+    const initialEstimate = estimatedTotalOptimal ? `0/~${estimatedTotalOptimal.toLocaleString()}` : `0/${totalInputPaths} paths`;
+    process.stdout.write(`\r  ${initialEstimate} | round 1 | 0s elapsed | ? remaining   `);
+
+    const progressInterval = setInterval(() => {
+      updateProgress();
+    }, 1000);
+
+    return new Promise((resolve, reject) => {
+      // Create workers
+      for (let i = 0; i < N_WORKERS; i++) {
         const worker = new Worker(fileURLToPath(import.meta.url), {
           workerData: {
-            inputPaths: chunk,
             startWeek: startingWeeks,
             numWeeks: N_WEEKS,
             nTeams: N_TEAMS,
@@ -1035,175 +1216,190 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
         });
         workerInstances[i] = worker;
 
-        worker.on('message', (msg) => {
-          if (msg.type === 'startPath') {
-            // Track which path this worker is currently processing
-            workerInFlightPaths[i] = msg.path;
-          } else if (msg.type === 'progress') {
-            workerProgress[i] = msg.processed;
-            // Clear in-flight since we just finished one
-            workerInFlightPaths[i] = null;
-            totalPathsSoFar += msg.paths - (workerProgress[i] > 10 ? msg.paths : 0); // Approximate
-            updateProgress();  // Immediate update on progress change
+        worker.on('message', async (msg) => {
+          if (msg.type === 'ready') {
+            // Worker is ready - assign first work unit
+            const work = await getNextWork();
+            if (work) {
+              workerCurrentPath[i] = work.inputPath;
+              worker.postMessage({ type: 'work', ...work });
+            } else {
+              worker.postMessage({ type: 'done' });
+              workersFinished++;
+              if (workersFinished === N_WORKERS) {
+                finishUp();
+              }
+            }
           } else if (msg.type === 'optimal') {
-            // OPTIMIZATION: All optimal results have the same pre-computed TARGET_SCORE
-            // Build full paths from worker message
+            // Worker found optimal paths - write them
             const week0 = msg.week0;
             const pathsToWrite = [];
 
             for (const laterWeeks of msg.continuations) {
               const fullPath = [week0, ...laterWeeks];
 
-              // Only deduplicate when resuming (existingPathHashes is populated during resume)
-              // For fresh runs, workers process disjoint starting paths so no duplicates possible
-              if (existingPathHashes.size > 0) {
-                const pathHash = hashPath(fullPath);
-                if (existingPathHashes.has(pathHash)) {
-                  continue;  // Skip duplicate from resume
-                }
-                existingPathHashes.add(pathHash);
+              // Always deduplicate - async race conditions can cause duplicates
+              const pathHash = hashPath(fullPath);
+              if (existingPathHashes.has(pathHash)) {
+                continue;
               }
+              existingPathHashes.add(pathHash);
 
               pathsToWrite.push(fullPath);
             }
 
             if (pathsToWrite.length > 0) {
               writePathBatch(pathsToWrite);
+              updateProgress();  // Update display when results come in
             }
-          } else if (msg.type === 'done') {
-            workerProgress[i] = workerTotals[i];
-            resolve(msg);
+          } else if (msg.type === 'result') {
+            // Worker finished a work unit
+            const { pathIndex, totalFound, isComplete: pathComplete } = msg;
+
+            foundCounts[pathIndex] = totalFound;
+            isComplete[pathIndex] = pathComplete;
+            pathsProcessed++;
+
+            // If path hit breadth limit (not complete), write … marker immediately
+            if (!pathComplete && workerCurrentPath[i] && optimalWriter) {
+              const inputPath = workerCurrentPath[i];
+              
+              // Find common prefix with last written path
+              let commonDepth = 0;
+              if (lastWrittenPath) {
+                while (commonDepth < lastWrittenPath.length &&
+                       commonDepth < inputPath.length &&
+                       schedulesEqual(lastWrittenPath[commonDepth], inputPath[commonDepth])) {
+                  commonDepth++;
+                }
+              }
+
+              // Write the input path nodes that differ from last written
+              for (let depth = commonDepth; depth < inputPath.length; depth++) {
+                optimalWriter.writeNode(depth, inputPath[depth]);
+              }
+              
+              // Write incomplete marker at the next depth (where continuations would go)
+              optimalWriter.writeIncompleteMarker(inputPath.length);
+              
+              lastWrittenPath = inputPath.map(s => Array.from(s));
+              
+              // Track for resume
+              incompletePathsMap.set(pathIndex, inputPath);
+            } else if (pathComplete) {
+              incompletePathsMap.delete(pathIndex);  // Path is now complete
+            }
+
+            workerCurrentPath[i] = null;
+
+            updateProgress();
+
+            // Assign next work
+            const work = await getNextWork();
+            if (work) {
+              workerCurrentPath[i] = work.inputPath;
+              worker.postMessage({ type: 'work', ...work });
+            } else {
+              worker.postMessage({ type: 'done' });
+              workersFinished++;
+              if (workersFinished === N_WORKERS) {
+                finishUp();
+              }
+            }
           }
         });
-        worker.on('error', reject);
-        worker.on('exit', (code) => {
-          if (code !== 0) reject(new Error(`Worker ${i} exited with code ${code}`));
+
+        worker.on('error', (err) => {
+          console.error(`Worker ${i} error:`, err);
+          reject(err);
         });
-      });
-    });
 
-    // Format duration for human readability
-    function formatDuration(seconds) {
-      if (seconds < 60) return `${Math.round(seconds)}s`;
-      if (seconds < 3600) {
-        const m = Math.floor(seconds / 60);
-        const s = Math.round(seconds % 60);
-        return `${m}:${s.toString().padStart(2, '0')} minutes`;
-      }
-      if (seconds < 86400) {
-        const h = Math.floor(seconds / 3600);
-        const m = Math.round((seconds % 3600) / 60);
-        return `${h}:${m.toString().padStart(2, '0')} hours`;
-      }
-      if (seconds < 86400 * 14) {
-        const d = Math.floor(seconds / 86400);
-        const h = Math.floor((seconds % 86400) / 3600);
-        const m = Math.round((seconds % 3600) / 60);
-        return `${d}d ${h}:${m.toString().padStart(2, '0')}`;
-      }
-      if (seconds < 86400 * 365) {
-        const weeks = seconds / (86400 * 7);
-        return `${weeks.toFixed(1)} weeks`;
-      }
-      const years = Math.floor(seconds / (86400 * 365));
-      const weeks = Math.round((seconds % (86400 * 365)) / (86400 * 7));
-      return `${years}y ${weeks}w`;
-    }
-
-    // Progress display function
-    function updateProgress(saveInfo = '') {
-      const now = performance.now();
-      const elapsed = (now - workerStart) / 1000;
-      const processed = workerProgress.reduce((a, b) => a + b, 0);
-
-      const pct = ((processed / totalInputPaths) * 100).toFixed(1);
-      const rate = processed / elapsed;
-      const remaining = totalInputPaths - processed;
-      const eta = rate > 0 ? formatDuration(remaining / rate) : '?';
-
-      // MEMORY OPTIMIZATION: optimalCount is now tracked incrementally
-      process.stdout.write(`\r  ${processed}/${totalInputPaths} paths (${pct}%) | ${formatDuration(elapsed)} so far | ${eta} to go | ${optimalCount} optimal${saveInfo}   `);
-    }
-
-    // Show initial progress immediately
-    process.stdout.write(`\r  0/${totalInputPaths} paths (0.0%) | 0s so far | ? to go | 0 optimal   `);
-
-    // Periodic display update (1Hz) - no periodic saves since streaming writes go directly to disk
-    // Finalization only happens on interrupt (SIGINT/SIGTERM) or completion
-    const progressInterval = setInterval(() => {
-      updateProgress();
-    }, 1000);  // Update display every 1s
-
-    // SIGINT handler for graceful shutdown
-    const handleSigint = () => {
-      if (shuttingDown) {
-        console.log('\n\nForce exit (second Ctrl+C)');
-        process.exit(1);
-      }
-      shuttingDown = true;
-      console.log('\n\nInterrupted - saving progress with incomplete markers...');
-
-      // Terminate all workers
-      for (const worker of workerInstances) {
-        if (worker) worker.terminate();
+        worker.on('exit', (code) => {
+          if (code !== 0 && !shuttingDown) {
+            reject(new Error(`Worker ${i} exited with code ${code}`));
+          }
+        });
       }
 
-      // Collect in-flight paths (filter nulls)
-      const inFlightPaths = workerInFlightPaths.filter(p => p !== null);
-      console.log(`  ${inFlightPaths.length} in-flight paths marked as incomplete`);
+      // SIGINT handler
+      const handleSigint = () => {
+        if (shuttingDown) {
+          console.log('\n\nForce exit (second Ctrl+C)');
+          process.exit(1);
+        }
+        shuttingDown = true;
+        console.log('\n\nInterrupted - saving progress...');
 
-      // MEMORY OPTIMIZATION: Finalize the streaming file with in-flight markers
-      finalizeOptimalFile(false, inFlightPaths).then(() => {
-        console.log(`  Saved ${optimalCount} complete paths to ${saveFile}`);
-        console.log(`  Resume with: node calculate.mjs --teams=${N_TEAMS} --weeks=${N_WEEKS}`);
+        // Terminate all workers
+        for (const worker of workerInstances) {
+          if (worker) worker.terminate();
+        }
+
+        // Collect all incomplete paths:
+        // 1. In-flight paths (currently being processed by workers)
+        // 2. Paths that hit breadth limit and weren't fully explored
+        const inFlightPaths = workerCurrentPath.filter(p => p !== null);
+        const breadthLimitPaths = Array.from(incompletePathsMap.values());
+        const allIncompletePaths = [...inFlightPaths, ...breadthLimitPaths];
+        
+        console.log(`  ${inFlightPaths.length} in-flight + ${breadthLimitPaths.length} breadth-limited = ${allIncompletePaths.length} incomplete paths`);
+
+        finalizeOptimalFile(false, allIncompletePaths).then(() => {
+          console.log(`  Saved ${optimalCount} complete paths to ${saveFile}`);
+          console.log(`  Resume with: node calculate.mjs --teams=${N_TEAMS} --weeks=${N_WEEKS}`);
+          clearInterval(progressInterval);
+          process.exit(0);
+        });
+      };
+      process.on('SIGINT', handleSigint);
+      process.on('SIGTERM', handleSigint);
+
+      function finishUp() {
+        process.off('SIGINT', handleSigint);
+        process.off('SIGTERM', handleSigint);
         clearInterval(progressInterval);
-        process.exit(0);
-      });
-    };
-    process.on('SIGINT', handleSigint);
-    process.on('SIGTERM', handleSigint);  // Also handle SIGTERM (used by timeout, kill, etc.)
+        process.stdout.write('\n');
 
-    const results = await Promise.all(workers);
-    process.off('SIGINT', handleSigint);  // Remove handler after normal completion
-    process.off('SIGTERM', handleSigint);
-    clearInterval(progressInterval);
-    process.stdout.write('\n');
-    return { results, totalInputPaths };
+        // Collect incomplete paths from the map (works for both streaming and in-memory modes)
+        const incompletePaths = Array.from(incompletePathsMap.values());
+
+        resolve({
+          totalInputPaths,
+          pathsProcessed,
+          incompletePaths,
+          foundCounts
+        });
+      }
+    });
   }
 
-  runWorkers().then(async ({ results, totalInputPaths }) => {
+  runWorkers().then(async ({ totalInputPaths, pathsProcessed, incompletePaths, foundCounts }) => {
     const elapsed = (performance.now() - workerStart) / 1000;
 
-    // Aggregate stats from workers
-    let totalPaths = 0;
-    let workerOptimalCount = 0;
-    let globalMinPerPath = Infinity;
-    let globalMaxPerPath = 0;
-    let globalTotalPerPath = 0;
-    let totalPathCount = 0;
+    console.log(`\nCompleted in ${elapsed.toFixed(2)}s`);
+    console.log(`Optimal: ${optimalCount} with total doubleByes=${TARGET_SCORE[0]}, fiveSlotTeams=${TARGET_SCORE[1]}`);
 
-    for (const r of results) {
-      totalPaths += r.totalPaths;
-      totalPathCount += r.pathCount;
-      globalTotalPerPath += r.totalPerPath;
-      workerOptimalCount += r.optimalCount;
-
-      if (r.minPerPath < globalMinPerPath) globalMinPerPath = r.minPerPath;
-      if (r.maxPerPath > globalMaxPerPath) globalMaxPerPath = r.maxPerPath;
+    if (foundCounts && foundCounts.length > 0) {
+      const validCounts = foundCounts.filter(c => c > 0);
+      if (validCounts.length > 0) {
+        const min = Math.min(...validCounts);
+        const max = Math.max(...validCounts);
+        const avg = validCounts.reduce((a, b) => a + b, 0) / validCounts.length;
+        console.log(`Continuations per path: min=${min}, max=${max}, avg=${avg.toFixed(1)}`);
+      }
     }
 
-    const avgPerPath = totalPathCount > 0 ? globalTotalPerPath / totalPathCount : 0;
+    console.log(`Throughput: ${(optimalCount / elapsed).toFixed(0)} optimal/sec`);
 
-    console.log(`\nCompleted in ${elapsed.toFixed(2)}s`);
-    console.log(`Total: ${totalPaths} complete ${N_WEEKS}-week schedules`);
-    console.log(`Optimal: ${optimalCount} with total doubleByes=${TARGET_SCORE[0]}, fiveSlotTeams=${TARGET_SCORE[1]}`);
-    console.log(`Input stats: ${totalPathCount} paths, extensions per path: min=${globalMinPerPath}, max=${globalMaxPerPath}, avg=${avgPerPath.toFixed(1)}`);
-    console.log(`Throughput: ${(totalPaths / elapsed).toFixed(0)} paths/sec`);
+    if (incompletePaths && incompletePaths.length > 0) {
+      console.log(`Incomplete paths: ${incompletePaths.length} (breadth limit)`);
+    }
 
-    // MEMORY OPTIMIZATION: Finalize the streaming file (skip in validate mode)
+    // Finalize file
     if (optimalCount > 0 && !VALIDATE) {
-      await finalizeOptimalFile(true);
-      console.log(`Saved ${optimalCount} optimal paths to ${saveFile}`);
+      const isPartial = incompletePaths && incompletePaths.length > 0;
+      await finalizeOptimalFile(!isPartial, isPartial ? incompletePaths : []);
+      console.log(`Saved ${optimalCount} optimal paths to ${saveFile}${isPartial ? ' (partial)' : ''}`);
     }
   }).catch((err) => {
     console.error('Worker error:', err);

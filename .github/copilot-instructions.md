@@ -14,12 +14,14 @@ Generates optimal tournament schedules for N teams over multiple weeks, minimizi
 - **Slots**: Time slots in a week; N_SLOTS = (N_TEAMS × 3) / 2 (each team plays 3 games)
 - **Patterns**: Valid 3-slot combinations within span constraints (shapes 4 or 5)
 
-### Scoring
+### Scoring (Internal Only)
 
-Schedules scored by `[doubleByes, fiveSlotTeams]` tuple (lower is better):
+Schedules are filtered internally by `[doubleByes, fiveSlotTeams]` tuple (lower is better):
 
 - `doubleByes`: Count of 3-slot gaps between consecutive games for a team
 - `fiveSlotTeams`: Count of teams whose games span 5+ slots
+- **Optimal per week**: Always `[2, 4]` - this is fixed and known
+- **Score is NOT stored in result files** - only used internally for filtering
 
 ### Round-Robin Rules
 
@@ -62,26 +64,40 @@ When a week straddles two rounds, games from round N+1 may appear in ANY slot—
 
 All results use **streaming text format** (`.txt`) for memory efficiency:
 
+- **Header**: `# teams=N weeks=W count=C` (optionally `(partial)` if incomplete)
 - **1-week files** (`results/{N}teams-1week.txt`): One schedule per line, comma-separated matchup indices
 - **Multi-week files** (`results/{N}teams-{M}weeks.txt`): Tab-indented depth-first tree traversal
+- **Incomplete branches**: Marked with `…` (ellipsis) when interrupted mid-processing
 
-**Reading results:**
+**Using TreeReader/TreeWriter (recommended):**
 
 ```javascript
-import { createReadStream } from 'fs';
-import { createInterface } from 'readline';
+import { TreeReader, TreeWriter, readHeaderFromFile } from './lib/tree-format.mjs';
 
-// Stream line-by-line (memory efficient for large files)
-const rl = createInterface({ input: createReadStream('results/6teams-1week.txt') });
-for await (const line of rl) {
-  const schedule = line.split(',').map(Number);
-  // process schedule...
+// Read header only (streaming - handles large files)
+const header = await readHeaderFromFile('results/6teams-4weeks.txt');
+console.log(header.teams, header.weeks, header.count, header.partial);
+
+// Stream paths from file (memory efficient)
+const reader = new TreeReader('results/6teams-4weeks.txt');
+for await (const path of reader.paths()) {
+  // path is array of weeks: [[week0 matchups], [week1 matchups], ...]
 }
 
-// Or read entire file (small files only)
+// Write results with automatic prefix compression
+const writer = new TreeWriter('results/output.txt');
+writer.writeHeader(teams, weeks, initialCount);
+writer.writePath([[...week0], [...week1], ...]);
+await writer.finalize({ teams, weeks, count: finalCount });
+```
+
+**Manual reading (small files only):**
+
+```javascript
 import { readFileSync } from 'fs';
 const schedules = readFileSync('results/6teams-1week.txt', 'utf8')
   .trim().split('\n')
+  .filter(line => !line.startsWith('#'))
   .map(line => line.split(',').map(Number));
 ```
 
@@ -119,8 +135,9 @@ Grid view (Week 0):
 ### CLI Flags
 
 - `--teams=N`: Number of teams (must be even, max 16)
-- `--weeks=N`: Number of weeks to generate (parallel version requires ≥2)
+- `--weeks=N`: Number of weeks to generate
 - `--workers=N`: Number of worker threads (defaults to CPU count)
+- `--breadth=N`: Results per input path per round in breadth-first mode (default: 32)
 - `--validate`: Run without reading/writing files (test enumeration only)
 - `--debug`: Enable verbose logging
 
@@ -146,18 +163,40 @@ When spanning multiple weeks, ensures each pair plays exactly once per round:
 
 ### Parallelization Strategy
 
-- Main thread generates all optimal week-0 schedules
+**Breadth-first round-robin work distribution:**
 
-- Chunks distributed to workers; each explores all continuations
-- Workers report `optimal` results incrementally via `parentPort.postMessage`
-- Final results aggregated and saved with tree structure
+1. Main thread streams input paths from prior results file (no memory load for large files)
+2. Workers receive individual paths via messages with `skipOffset` and `breadthLimit`
+3. Each worker finds up to `breadth` optimal continuations per path, then returns
+4. Main thread assigns work round-robin: all paths get round 1 work before any get round 2
+5. Incomplete paths (hit breadth limit) are revisited in subsequent rounds
+6. Workers report `optimal` results incrementally via `parentPort.postMessage`
+
+**Progress estimation:**
+
+Uses experimentally-determined `CONTINUATION_MULTIPLIERS` to estimate total optimal schedules:
+- 6 teams: week 2 = 36/path, week 3 = 96/path, week 4 = 192/path
+- 8 teams: week 2 = 32/path, week 3 = 32/path, etc.
+
+**Resume support:**
+
+- Partial files (marked with `(partial)` in header) can be resumed automatically
+- Incomplete branches marked with `…` are re-explored on resume
+- Completed paths are copied and skipped via hash deduplication
 
 ## Constraints & Gotchas
 
 1. **Team limit**: TEAMS string only has 16 letters; N_TEAMS > 16 fails
 2. **Week count**: `calculate.mjs` requires `N_WEEKS >= 1`
-3. **Memory**: Multi-week results can be huge; use streaming `.txt` format for large runs
+3. **Memory**: Multi-week results can be huge (e.g., 6teams-4weeks.txt is 32M+ lines)
+   - Always use `TreeReader` to stream paths, never load entire file
+   - Use `readHeaderFromFile()` to get header without loading file
+   - The round-robin scheduler streams through source files, re-streaming each round
 4. **Pattern masks**: Use BigInt (not Number) since pattern count can exceed 32
+5. **Score is internal only**: Never store or display score in headers or output
+   - Optimal score per week is always `[2, 4]` (doubleByes, fiveSlotTeams)
+   - Use `scoreSchedule()` only for internal filtering during enumeration
+6. **Graceful shutdown**: Ctrl+C saves progress with incomplete branches marked as `…`
 
 ## Development Workflow
 
@@ -165,12 +204,32 @@ When spanning multiple weeks, ensures each pair plays exactly once per round:
 # Generate and save 1-week schedules (creates results/{N}teams-1week.txt)
 node calculate.mjs --teams=6 --weeks=1
 
-# Generate multi-week (loads prior results, saves {N}teams-{M}weeks.txt)
+# Generate multi-week (streams from prior results, saves {N}teams-{M}weeks.txt)
 node calculate.mjs --teams=8 --weeks=2
+
+# Use more workers and smaller breadth for faster initial coverage
+node calculate.mjs --teams=6 --weeks=5 --workers=8 --breadth=16
+
+# Resume interrupted run (automatic if partial file exists)
+node calculate.mjs --teams=6 --weeks=5
 
 # Validate without file I/O
 node calculate.mjs --teams=8 --weeks=2 --validate
 
 # View results with grid display
 node display.mjs results/8teams-2weeks.txt --limit 3
+```
+
+## File Structure
+
+```
+results/
+  {N}teams-1week.txt      # Single-week optimal schedules
+  {N}teams-{M}weeks.txt   # Multi-week optimal paths (tree format)
+lib/
+  tree-format.mjs         # TreeReader, TreeWriter, parseHeader, readHeaderFromFile
+scripts/
+  validate-results.mjs    # Validate result file integrity
+  cleanup-tree.mjs        # Remove duplicates from tree files
+  analyze-schedule.mjs    # Analyze schedule statistics
 ```

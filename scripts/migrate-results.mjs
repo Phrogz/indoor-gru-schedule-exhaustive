@@ -48,9 +48,9 @@ function flattenTree(node, path = []) {
 
 // Parse header comments from .js files
 function parseJsHeader(content) {
-	const result = { teams: 0, weeks: 0, score: [0, 0], count: 0 };
+	const result = { teams: 0, weeks: 0, count: 0 };
 
-	// Look for patterns like: "8 teams, 2 weeks, score=[4,8], count=7136"
+	// Look for patterns like: "8 teams, 2 weeks, count=7136"
 	const teamsMatch = content.match(/(\d+)\s*teams/i);
 	if (teamsMatch) result.teams = parseInt(teamsMatch[1], 10);
 
@@ -59,9 +59,6 @@ function parseJsHeader(content) {
 
 	// week0 only = 1 week
 	if (content.includes('week0 only')) result.weeks = 1;
-
-	const scoreMatch = content.match(/score=\[(\d+),\s*(\d+)\]/);
-	if (scoreMatch) result.score = [parseInt(scoreMatch[1], 10), parseInt(scoreMatch[2], 10)];
 
 	const countMatch = content.match(/count=(\d+)/);
 	if (countMatch) result.count = parseInt(countMatch[1], 10);
@@ -87,7 +84,7 @@ async function migrateFile(jsPath) {
 	const rawContent = await readFile(jsPath, 'utf8');
 	const headerInfo = parseJsHeader(rawContent);
 
-	console.log(`  Header info: ${headerInfo.teams} teams, ${headerInfo.weeks} weeks, score=${headerInfo.score}, count=${headerInfo.count}`);
+	console.log(`  Header info: ${headerInfo.teams} teams, ${headerInfo.weeks} weeks, count=${headerInfo.count}`);
 
 	// Flatten all paths
 	let paths = [];
@@ -134,7 +131,7 @@ async function migrateFile(jsPath) {
 
 	// Write to new format
 	const writer = new TreeWriter(txtPath);
-	writer.writeHeader(headerInfo.teams, weeks, headerInfo.score, paths.length);
+	writer.writeHeader(headerInfo.teams, weeks, paths.length);
 
 	for (const path of paths) {
 		writer.writePath(path);
@@ -143,7 +140,6 @@ async function migrateFile(jsPath) {
 	await writer.finalize({
 		teams: headerInfo.teams,
 		weeks: weeks,
-		score: headerInfo.score,
 		count: paths.length
 	});
 

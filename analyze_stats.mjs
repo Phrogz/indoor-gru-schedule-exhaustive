@@ -126,8 +126,8 @@ async function analyzeFile(fileWeeks, note = '') {
 		const total = counts.reduce((a, b) => a + b, 0);
 		console.log(`Week ${childWeek} continuations per week ${parentWeek}: min=${stats.min.toLocaleString()}, median=${stats.median.toLocaleString()}, max=${stats.max.toLocaleString()}, average=${stats.average.toFixed(2)}`);
 		console.log(`Total week ${childWeek} schedules: ${total.toLocaleString()}`);
-		console.log(`\nArray of week ${childWeek} counts for each week ${parentWeek} option:`);
-		console.log(JSON.stringify(counts));
+		// console.log(`\nArray of week ${childWeek} counts for each week ${parentWeek} option:`);
+		// console.log(JSON.stringify(counts));
 	} else {
 		console.log(`No week ${parentWeek} options found in file.`);
 	}

@@ -25,14 +25,14 @@ if (!headerLine.startsWith('#')) {
 }
 
 // Extract header info
-const headerMatch = headerLine.match(/teams=(\d+).*weeks=(\d+).*score=([\d,]+).*count=(\d+)/);
+const headerMatch = headerLine.match(/teams=(\d+).*weeks=(\d+).*count=(\d+)/);
 if (!headerMatch) {
   console.error('Error: Could not parse header');
   process.exit(1);
 }
 
-const [, teams, weeks, score, count] = headerMatch;
-console.log(`  teams=${teams}, weeks=${weeks}, score=${score}, count=${count}`);
+const [, teams, weeks, count] = headerMatch;
+console.log(`  teams=${teams}, weeks=${weeks}, count=${count}`);
 
 // Extract all complete paths
 console.log('Extracting paths...');
