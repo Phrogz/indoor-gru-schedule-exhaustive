@@ -43,7 +43,7 @@ Example:
   node evaluate.mjs --teams=6 --weeks=5
 
 Reads results/{N}teams-{W}weeks.txt and evaluates all schedules.
-Outputs best schedules to results/{N}teams-{W}weeks-evaluated.txt
+Outputs best schedules to results/{N}teams-{W}weeks-best.txt
 `);
 		process.exit(0);
 	}
@@ -664,7 +664,7 @@ function formatTeamMatchupsGrid(path) {
 
 async function main() {
 	const inputPath = `results/${N_TEAMS}teams-${N_WEEKS}weeks.txt`;
-	const outputPath = `results/${N_TEAMS}teams-${N_WEEKS}weeks-evaluated.txt`;
+	const outputPath = `results/${N_TEAMS}teams-${N_WEEKS}weeks-best.txt`;
 
 	console.log(`Evaluating schedules from: ${inputPath}`);
 	console.log(`Teams: ${N_TEAMS}, Weeks: ${N_WEEKS}, Slots per week: ${N_SLOTS}`);
@@ -724,7 +724,7 @@ async function main() {
 
 	// Write results to file
 	const outputLines = [];
-	outputLines.push(`# teams=${N_TEAMS} weeks=${N_WEEKS} score=${bestScore.toFixed(4)} count=${bestSchedules.length}`);
+	outputLines.push(`# teams=${N_TEAMS} weeks=${N_WEEKS} count=${bestSchedules.length}`);
 	outputLines.push(`# Pain multipliers: ${JSON.stringify(overallPainMultipliers)}`);
 	outputLines.push('');
 

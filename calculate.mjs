@@ -807,7 +807,7 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
 
     // Save 1-week schedules
     if (!VALIDATE) {
-      const header = `# teams=${N_TEAMS} weeks=1 score=${bestScore.join(',')} count=${optimal.length}\n`;
+      const header = `# teams=${N_TEAMS} weeks=1 count=${optimal.length}\n`;
       const lines = optimal.map(p => p[0].join(','));
       writeFileSync(week1File, header + lines.join('\n') + '\n');
       console.log(`Saved ${optimal.length} optimal 1-week schedules to ${week1File}`);
