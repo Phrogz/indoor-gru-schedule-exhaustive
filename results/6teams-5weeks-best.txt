@@ -1,0 +1,48 @@
+# teams=6 weeks=5 count=2
+# Pain multipliers: {"doubleHeaderPain":0.05,"unfairDoubleHeaderPain":0.5,"unfairDoubleByePain":0.5,"totalSlotsPain":0.01,"unfairSlotsPain":0.1,"unfairEarlyLate":0.4,"unfair3rdVs2nd":0.5,"unevenMatchups":1}
+
+Schedule 10581/13068 :: Score: 3.8655
+Week 1: AvB AvF BvF AvD BvE CvF DvE CvD CvE
+Week 2: DvF EvF DvE CvF BvD AvE BvC AvC AvB
+Week 3: BvC CvD BvD AvC BvE DvF AvE AvF EvF
+Week 4: AvE CvE AvC EvF AvD BvC DvF BvF BvD
+Week 5: BvF AvB AvF BvE CvF AvD CvE DvE CvD
+doubleHeaderPain      :  1.00 (0.05 * 20.0) A:4 B:2 C:4 D:3 E:3 F:4
+unfairDoubleHeaderPain:  0.37 (0.5 * 0.7) A:4 B:2 C:4 D:3 E:3 F:4
+unfairDoubleByePain   :  0.37 (0.5 * 0.7) A:2 B:0 C:2 D:2 E:2 F:2
+totalSlotsPain        :  1.40 (0.01 * 140.0) 140 total slots spanned
+unfairSlotsPain       :  0.05 (0.1 * 0.5) A:23 B:23 C:23 D:24 E:24 F:23
+unfairEarlyLate       :  0.49 (0.4 * 1.2) A:[4,3] B:[4,3] C:[3,4] D:[2,4] E:[3,3] F:[4,3]
+unfair3rdVs2nd        :  0.19 (0.5 * 0.4) A:1 B:0 C:1 D:1 E:1 F:1
+unevenMatchups        :  0.00 (1 * 0.0) balanced
+Team Matchups:
+  A B C D E F
+A · 3 3 3 3 3
+B 3 · 3 3 3 3
+C 3 3 · 3 3 3
+D 3 3 3 · 3 3
+E 3 3 3 3 · 3
+F 3 3 3 3 3 ·
+
+Schedule 11048/13068 :: Score: 3.8655
+Week 1: AvB AvF BvF AvD BvE CvF DvE CvD CvE
+Week 2: DvF EvF DvE CvF BvD AvE BvC AvC AvB
+Week 3: BvC CvD BvD AvC BvE DvF AvE AvF EvF
+Week 4: BvF AvB AvF BvE CvF AvD CvE DvE CvD
+Week 5: AvE CvE AvC EvF AvD BvC DvF BvF BvD
+doubleHeaderPain      :  1.00 (0.05 * 20.0) A:4 B:2 C:4 D:3 E:3 F:4
+unfairDoubleHeaderPain:  0.37 (0.5 * 0.7) A:4 B:2 C:4 D:3 E:3 F:4
+unfairDoubleByePain   :  0.37 (0.5 * 0.7) A:2 B:0 C:2 D:2 E:2 F:2
+totalSlotsPain        :  1.40 (0.01 * 140.0) 140 total slots spanned
+unfairSlotsPain       :  0.05 (0.1 * 0.5) A:23 B:23 C:23 D:24 E:24 F:23
+unfairEarlyLate       :  0.49 (0.4 * 1.2) A:[4,3] B:[4,3] C:[3,4] D:[2,4] E:[3,3] F:[4,3]
+unfair3rdVs2nd        :  0.19 (0.5 * 0.4) A:1 B:0 C:1 D:1 E:1 F:1
+unevenMatchups        :  0.00 (1 * 0.0) balanced
+Team Matchups:
+  A B C D E F
+A · 3 3 3 3 3
+B 3 · 3 3 3 3
+C 3 3 · 3 3 3
+D 3 3 3 · 3 3
+E 3 3 3 3 · 3
+F 3 3 3 3 3 ·
