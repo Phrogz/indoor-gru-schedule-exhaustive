@@ -442,6 +442,91 @@ if (!isMainThread) {
   // Each continuation is (numWeeks - 1) weeks × nSlots bytes
   const CONTINUATION_SIZE = (numWeeks - 1) * nSlots;
 
+  // ============================================================================
+  // MAJOR OPTIMIZATION: Precompute all optimal single-week schedules once
+  // Instead of running full backtracking enumeration for each input path,
+  // we precompute all optimal schedules and filter by constraints.
+  // This changes O(millions of backtracking steps) to O(thousands of bitmask checks).
+  // ============================================================================
+  const ALL_OPTIMAL_WEEKS = [];   // Array of Uint8Array schedules
+  const ALL_OPTIMAL_MASKS = [];   // Bitmask of matchups used in each schedule
+
+  // Precompute on worker initialization (one-time cost)
+  enumerateSchedules({
+    onSchedule: (sched) => {
+      const score = scoreSchedule(sched);
+      if (score.doubleByes === 2 && score.fiveSlotTeams === 4) {
+        let mask = 0;
+        for (const m of sched) mask |= (1 << m);
+        ALL_OPTIMAL_WEEKS.push(new Uint8Array(sched));
+        ALL_OPTIMAL_MASKS.push(mask);
+      }
+    }
+  });
+
+  // LRU cache for constraint filtering results
+  // Maps (excludeMatchups, requiredMask) -> array of valid schedule indices
+  // Limits memory usage while allowing repeated constraint patterns to be fast
+  class LRUCache {
+    constructor(maxSize) {
+      this.maxSize = maxSize;
+      this.cache = new Map();
+    }
+
+    get(key) {
+      if (!this.cache.has(key)) return undefined;
+      // Move to end (most recently used)
+      const value = this.cache.get(key);
+      this.cache.delete(key);
+      this.cache.set(key, value);
+      return value;
+    }
+
+    set(key, value) {
+      if (this.cache.has(key)) {
+        this.cache.delete(key);
+      } else if (this.cache.size >= this.maxSize) {
+        // Delete oldest (first) entry
+        const firstKey = this.cache.keys().next().value;
+        this.cache.delete(firstKey);
+      }
+      this.cache.set(key, value);
+    }
+
+    clear() {
+      this.cache.clear();
+    }
+  }
+
+  // Cache size: 10k entries should be plenty for most constraint combinations
+  // Each entry stores indices (small), not full schedules
+  const constraintCache = new LRUCache(10000);
+
+  // Filter precomputed schedules by constraints - the core optimization
+  function getValidOptimalWeeks(excludeMatchups, requiredMatchups) {
+    // Convert requiredMatchups Set to bitmask for fast comparison
+    let requiredMask = 0;
+    for (const m of requiredMatchups) requiredMask |= (1 << m);
+
+    const key = `${excludeMatchups}|${requiredMask}`;
+    const cached = constraintCache.get(key);
+    if (cached !== undefined) return cached;
+
+    // Filter: O(n) where n is number of precomputed schedules (thousands, not millions)
+    const result = [];
+    for (let i = 0; i < ALL_OPTIMAL_WEEKS.length; i++) {
+      const mask = ALL_OPTIMAL_MASKS[i];
+      // Check: no excluded matchups used
+      if (mask & excludeMatchups) continue;
+      // Check: all required matchups present
+      if ((mask & requiredMask) !== requiredMask) continue;
+      result.push(ALL_OPTIMAL_WEEKS[i]);
+    }
+
+    constraintCache.set(key, result);
+    return result;
+  }
+
   // Pack weeks 1..N into a single Uint8Array
   function packContinuation(weeks) {
     const packed = new Uint8Array(CONTINUATION_SIZE);
@@ -521,9 +606,6 @@ if (!isMainThread) {
     return roundMatchups;
   }
 
-  // OPTIMIZATION: Optimal score per week is always [2,4]
-  const OPTIMAL_WEEK_SCORE = [2, 4];
-
   // State for processing a single work unit
   let optimalCount = 0;
   let skipOffset = 0;
@@ -575,25 +657,18 @@ if (!isMainThread) {
     const gameOffset = weekNum * nSlots;
     const { excludeMatchups, requiredMatchups } = getRoundConstraints(gameOffset, roundMatchups);
 
-    enumerateSchedules({
-      excludeMatchups,
-      requiredMatchups,
-      onSchedule: (sched) => {
-        // Check if we've collected enough for this breadth chunk
-        if (breadthReached) return;
+    // OPTIMIZATION: Use precomputed optimal schedules instead of full enumeration
+    // This is the key speedup: O(thousands) filter vs O(millions) backtracking
+    const validSchedules = getValidOptimalWeeks(excludeMatchups, requiredMatchups);
 
-        // OPTIMIZATION: Check this week's score immediately, skip if not optimal
-        const score = scoreSchedule(sched);
-        if (score.doubleByes !== OPTIMAL_WEEK_SCORE[0] || score.fiveSlotTeams !== OPTIMAL_WEEK_SCORE[1]) {
-          return;  // Prune this branch
-        }
+    for (const sched of validSchedules) {
+      if (breadthReached) return;
 
-        const weekMatchups = Array.from(sched);
-        const newRoundMatchups = updateRoundMatchups(weekNum, weekMatchups, roundMatchups, requiredMatchups);
-        const newWeeks = weeks.concat([new Uint8Array(sched)]);
-        enumerateFromPath(week0, weekNum + 1, newRoundMatchups, newWeeks);
-      }
-    });
+      const weekMatchups = Array.from(sched);
+      const newRoundMatchups = updateRoundMatchups(weekNum, weekMatchups, roundMatchups, requiredMatchups);
+      const newWeeks = weeks.concat([new Uint8Array(sched)]);
+      enumerateFromPath(week0, weekNum + 1, newRoundMatchups, newWeeks);
+    }
   }
 
   // Process a single work unit (one input path with skipOffset and breadth)
@@ -650,8 +725,11 @@ if (!isMainThread) {
     }
   });
 
-  // Signal ready to receive work
-  parentPort.postMessage({ type: 'ready' });
+  // Signal ready to receive work, include precomputation stats
+  parentPort.postMessage({
+    type: 'ready',
+    precomputedCount: ALL_OPTIMAL_WEEKS.length
+  });
 }
 
 // Main thread logic
@@ -1236,6 +1314,10 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
 
         worker.on('message', async (msg) => {
           if (msg.type === 'ready') {
+            // Log precomputation stats from first worker only
+            if (i === 0 && msg.precomputedCount) {
+              console.log(`  Workers precomputed ${msg.precomputedCount.toLocaleString()} optimal single-week schedules`);
+            }
             // Worker is ready - assign first work unit
             const work = await getNextWork();
             if (work) {
