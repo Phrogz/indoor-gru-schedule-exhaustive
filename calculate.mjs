@@ -443,38 +443,30 @@ if (!isMainThread) {
   const CONTINUATION_SIZE = (numWeeks - 1) * nSlots;
 
   // ============================================================================
-  // MAJOR OPTIMIZATION: Precompute all optimal single-week schedules once
-  // Instead of running full backtracking enumeration for each input path,
-  // we precompute all optimal schedules and filter by constraints.
-  // This changes O(millions of backtracking steps) to O(thousands of bitmask checks).
+  // MAJOR OPTIMIZATION: Cache optimal schedules by constraint key
+  // Instead of re-enumerating for each input path with the same constraints,
+  // we cache the results. The constraints (excludeMatchups, requiredMatchups)
+  // dramatically prune the search space, making enumeration fast.
+  // Many input paths share the same round state, so caching gives huge wins.
   // ============================================================================
-  const ALL_OPTIMAL_WEEKS = [];   // Array of Uint8Array schedules
-  const ALL_OPTIMAL_MASKS = [];   // Bitmask of matchups used in each schedule
 
-  // Precompute on worker initialization (one-time cost)
-  enumerateSchedules({
-    onSchedule: (sched) => {
-      const score = scoreSchedule(sched);
-      if (score.doubleByes === 2 && score.fiveSlotTeams === 4) {
-        let mask = 0;
-        for (const m of sched) mask |= (1 << m);
-        ALL_OPTIMAL_WEEKS.push(new Uint8Array(sched));
-        ALL_OPTIMAL_MASKS.push(mask);
-      }
-    }
-  });
-
-  // LRU cache for constraint filtering results
-  // Maps (excludeMatchups, requiredMask) -> array of valid schedule indices
+  // LRU cache for constraint-based enumeration results
+  // Maps (excludeMatchups, requiredMask) -> array of optimal schedules
   // Limits memory usage while allowing repeated constraint patterns to be fast
   class LRUCache {
     constructor(maxSize) {
       this.maxSize = maxSize;
       this.cache = new Map();
+      this.hits = 0;
+      this.misses = 0;
     }
 
     get(key) {
-      if (!this.cache.has(key)) return undefined;
+      if (!this.cache.has(key)) {
+        this.misses++;
+        return undefined;
+      }
+      this.hits++;
       // Move to end (most recently used)
       const value = this.cache.get(key);
       this.cache.delete(key);
@@ -496,15 +488,26 @@ if (!isMainThread) {
     clear() {
       this.cache.clear();
     }
+
+    stats() {
+      return { hits: this.hits, misses: this.misses, size: this.cache.size };
+    }
   }
 
   // Cache size: 10k entries should be plenty for most constraint combinations
-  // Each entry stores indices (small), not full schedules
+  // Each entry stores full schedules for that constraint combination
   const constraintCache = new LRUCache(10000);
 
-  // Filter precomputed schedules by constraints - the core optimization
+  // OPTIMIZATION: Optimal score per week is always [2,4]
+  const OPTIMAL_WEEK_SCORE = [2, 4];
+
+  // Enumerate optimal schedules for given constraints, with caching
+  // This is MUCH faster than unconstrained enumeration because:
+  // 1. excludeMatchups prunes many branches (matchups already used in round)
+  // 2. requiredMatchups adds additional constraints (must complete round)
+  // 3. Results are cached by constraint key for reuse
   function getValidOptimalWeeks(excludeMatchups, requiredMatchups) {
-    // Convert requiredMatchups Set to bitmask for fast comparison
+    // Convert requiredMatchups Set to bitmask for cache key
     let requiredMask = 0;
     for (const m of requiredMatchups) requiredMask |= (1 << m);
 
@@ -512,16 +515,18 @@ if (!isMainThread) {
     const cached = constraintCache.get(key);
     if (cached !== undefined) return cached;
 
-    // Filter: O(n) where n is number of precomputed schedules (thousands, not millions)
+    // Cache miss: enumerate with constraints (fast due to pruning)
     const result = [];
-    for (let i = 0; i < ALL_OPTIMAL_WEEKS.length; i++) {
-      const mask = ALL_OPTIMAL_MASKS[i];
-      // Check: no excluded matchups used
-      if (mask & excludeMatchups) continue;
-      // Check: all required matchups present
-      if ((mask & requiredMask) !== requiredMask) continue;
-      result.push(ALL_OPTIMAL_WEEKS[i]);
-    }
+    enumerateSchedules({
+      excludeMatchups,
+      requiredMatchups,
+      onSchedule: (sched) => {
+        const score = scoreSchedule(sched);
+        if (score.doubleByes === OPTIMAL_WEEK_SCORE[0] && score.fiveSlotTeams === OPTIMAL_WEEK_SCORE[1]) {
+          result.push(new Uint8Array(sched));
+        }
+      }
+    });
 
     constraintCache.set(key, result);
     return result;
@@ -725,11 +730,8 @@ if (!isMainThread) {
     }
   });
 
-  // Signal ready to receive work, include precomputation stats
-  parentPort.postMessage({
-    type: 'ready',
-    precomputedCount: ALL_OPTIMAL_WEEKS.length
-  });
+  // Signal ready to receive work
+  parentPort.postMessage({ type: 'ready' });
 }
 
 // Main thread logic
@@ -1314,10 +1316,6 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
 
         worker.on('message', async (msg) => {
           if (msg.type === 'ready') {
-            // Log precomputation stats from first worker only
-            if (i === 0 && msg.precomputedCount) {
-              console.log(`  Workers precomputed ${msg.precomputedCount.toLocaleString()} optimal single-week schedules`);
-            }
             // Worker is ready - assign first work unit
             const work = await getNextWork();
             if (work) {
