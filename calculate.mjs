@@ -1081,6 +1081,9 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
     let pathIterator = null;
     let currentPathIndex = 0;
     let roundComplete = false;
+    
+    // Queue to serialize getNextWork() calls (prevents readline race conditions)
+    let workQueue = Promise.resolve();
 
     async function* createPathIterator() {
       if (inMemoryPaths) {
@@ -1098,7 +1101,7 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
 
     // Get next work unit (round-robin across incomplete paths)
     // Returns null when current round is exhausted; caller should check roundComplete
-    async function getNextWork() {
+    async function getNextWorkInternal() {
       while (true) {
         if (!pathIterator) {
           pathIterator = createPathIterator();
@@ -1138,6 +1141,21 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
           };
         }
         // Path already complete, continue to next
+      }
+    }
+    
+    // Serialized wrapper to prevent concurrent iterator access (readline race condition)
+    async function getNextWork() {
+      // Chain onto the queue - each caller waits for all previous to finish
+      const myTurn = workQueue;
+      let signalDone;
+      workQueue = new Promise(resolve => { signalDone = resolve; });
+      
+      await myTurn;
+      try {
+        return await getNextWorkInternal();
+      } finally {
+        signalDone();
       }
     }
 

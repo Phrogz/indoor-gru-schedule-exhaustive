@@ -32,56 +32,60 @@ function parseArgs() {
 		console.log(`
 Tournament Schedule Evaluator
 
-Usage: node evaluate.mjs [options]
+Usage: node evaluate.mjs <file> [options]
+       node evaluate.mjs --teams=N --weeks=N [options]
+
+Arguments:
+  <file>        Path to results file (reads teams/weeks from header)
 
 Options:
-  --teams=N     Number of teams (must be even, 4-16)
-  --weeks=N     Number of weeks in schedules
+  --teams=N     Number of teams (optional if file provided)
+  --weeks=N     Number of weeks (optional if file provided)
   --help, -h    Show this help message
 
-Example:
+Examples:
+  node evaluate.mjs results/6teams-5weeks.txt
   node evaluate.mjs --teams=6 --weeks=5
 
-Reads results/{N}teams-{W}weeks.txt and evaluates all schedules.
 Outputs best schedules to results/{N}teams-{W}weeks-best.txt
 `);
 		process.exit(0);
 	}
 
-	let teams = null, weeks = null;
+	let teams = null, weeks = null, inputFile = null;
 	for (const arg of args) {
 		if (arg.startsWith('--teams=')) teams = parseInt(arg.slice(8));
 		else if (arg.startsWith('--weeks=')) weeks = parseInt(arg.slice(8));
+		else if (!arg.startsWith('-')) inputFile = arg;
 	}
 
-	if (!teams || !weeks) {
-		console.error('Error: --teams and --weeks are required');
-		process.exit(1);
-	}
-
-	return { teams, weeks };
+	return { teams, weeks, inputFile };
 }
 
 // ============================================================================
-// Constants (set after parsing args)
+// Constants (initialized by initConstants after reading file header)
 // ============================================================================
 
-const CONFIG = parseArgs();
-const N_TEAMS = CONFIG.teams;
-const N_WEEKS = CONFIG.weeks;
-const TEAMS = 'ABCDEFGHIJKLMNOP'.slice(0, N_TEAMS).split('');
-const N_SLOTS = (N_TEAMS * 3) / 2;
-const N_MATCHUPS = (N_TEAMS * (N_TEAMS - 1)) / 2;
+const CLI_ARGS = parseArgs();
+let N_TEAMS, N_WEEKS, TEAMS, N_SLOTS, N_MATCHUPS, matchupToTeams;
 
-// Precompute matchup encoding/decoding
-const matchupToTeams = new Uint8Array(N_MATCHUPS * 2);
+function initConstants(teams, weeks) {
+	N_TEAMS = teams;
+	N_WEEKS = weeks;
+	TEAMS = 'ABCDEFGHIJKLMNOP'.slice(0, N_TEAMS).split('');
+	N_SLOTS = (N_TEAMS * 3) / 2;
+	N_MATCHUPS = (N_TEAMS * (N_TEAMS - 1)) / 2;
 
-let idx = 0;
-for (let ti1 = 0; ti1 < N_TEAMS - 1; ti1++) {
-	for (let ti2 = ti1 + 1; ti2 < N_TEAMS; ti2++) {
-		matchupToTeams[idx * 2] = ti1;
-		matchupToTeams[idx * 2 + 1] = ti2;
-		idx++;
+	// Precompute matchup encoding/decoding
+	matchupToTeams = new Uint8Array(N_MATCHUPS * 2);
+
+	let idx = 0;
+	for (let ti1 = 0; ti1 < N_TEAMS - 1; ti1++) {
+		for (let ti2 = ti1 + 1; ti2 < N_TEAMS; ti2++) {
+			matchupToTeams[idx * 2] = ti1;
+			matchupToTeams[idx * 2 + 1] = ti2;
+			idx++;
+		}
 	}
 }
 
@@ -663,16 +667,42 @@ function formatTeamMatchupsGrid(path) {
 // ============================================================================
 
 async function main() {
-	const inputPath = `results/${N_TEAMS}teams-${N_WEEKS}weeks.txt`;
+	// Determine input file
+	let inputPath;
+	if (CLI_ARGS.inputFile) {
+		inputPath = CLI_ARGS.inputFile;
+	} else if (CLI_ARGS.teams && CLI_ARGS.weeks) {
+		inputPath = `results/${CLI_ARGS.teams}teams-${CLI_ARGS.weeks}weeks.txt`;
+	} else {
+		console.error('Error: Provide a file path or --teams and --weeks');
+		process.exit(1);
+	}
+
+	// Read header to get teams/weeks
+	const reader = new TreeReader(inputPath);
+	const header = await reader.readHeader();
+
+	// Use header values (or CLI overrides if provided)
+	const teams = CLI_ARGS.teams ?? header.teams;
+	const weeks = CLI_ARGS.weeks ?? header.weeks;
+
+	// Validate CLI args match header if both provided
+	if (CLI_ARGS.teams && CLI_ARGS.teams !== header.teams) {
+		console.warn(`Warning: --teams=${CLI_ARGS.teams} doesn't match file header (${header.teams})`);
+	}
+	if (CLI_ARGS.weeks && CLI_ARGS.weeks !== header.weeks) {
+		console.warn(`Warning: --weeks=${CLI_ARGS.weeks} doesn't match file header (${header.weeks})`);
+	}
+
+	// Initialize constants based on resolved values
+	initConstants(teams, weeks);
+
 	const outputPath = `results/${N_TEAMS}teams-${N_WEEKS}weeks-best.txt`;
 
 	console.log(`Evaluating schedules from: ${inputPath}`);
 	console.log(`Teams: ${N_TEAMS}, Weeks: ${N_WEEKS}, Slots per week: ${N_SLOTS}`);
 	console.log(`Pain multipliers:`, overallPainMultipliers);
 	console.log();
-
-	const reader = new TreeReader(inputPath);
-	const header = await reader.readHeader();
 	console.log(`File header: teams=${header.teams} weeks=${header.weeks} count=${header.count}`);
 	console.log();
 
@@ -680,8 +710,24 @@ async function main() {
 	let bestSchedules = [];
 	let evaluated = 0;
 
+	let skipped = 0;
 	for await (const path of reader.paths()) {
 		evaluated++;
+
+		// Validate schedule structure (skip corrupted entries from interrupted writes)
+		let valid = path.length === N_WEEKS;
+		if (valid) {
+			for (const week of path) {
+				if (week.length !== N_SLOTS) {
+					valid = false;
+					break;
+				}
+			}
+		}
+		if (!valid) {
+			skipped++;
+			continue;
+		}
 
 		// Gather week metrics (cached)
 		const weekResults = path.map(week => getWeekMetrics(week));
@@ -740,6 +786,9 @@ async function main() {
 
 	writeFileSync(outputPath, outputLines.join('\n'));
 	console.log(`\nResults written to: ${outputPath}`);
+	if (skipped > 0) {
+		console.warn(`Warning: Skipped ${skipped} invalid/corrupted schedules`);
+	}
 }
 
 main().catch(err => {

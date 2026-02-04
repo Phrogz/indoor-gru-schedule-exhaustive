@@ -214,6 +214,10 @@ async function validate() {
   const header = await parseHeader(filePath);
   console.log(`Validating: ${filePath}`);
   console.log(`  Teams: ${header.teams}, Weeks: ${header.weeks}, Expected count: ${header.count}`);
+  
+  if (header.count > 10_000_000) {
+    console.log(`  Note: Duplicate detection disabled for large files (>10M paths)`);
+  }
 
   const nTeams = header.teams;
   const nWeeks = header.weeks;
@@ -227,7 +231,23 @@ async function validate() {
   let errorCount = 0;
   let duplicateCount = 0;
   let scoreErrors = 0;
-  const seenPaths = new Set();
+  
+  // For very large files (>10M paths), skip duplicate detection to avoid Set size limits
+  // Structure validation is more important and will catch most issues
+  const enableDuplicateDetection = header.count <= 10_000_000;
+  
+  // Use hash-based duplicate detection for medium files (avoids Set size limits)
+  // Note: Hash collisions could cause false duplicate reports, but probability is very low
+  function hashPath(pathKey) {
+    let hash = 5381;
+    for (let i = 0; i < pathKey.length; i++) {
+      hash = ((hash << 5) + hash) + pathKey.charCodeAt(i);
+      hash = hash | 0; // Convert to 32-bit signed integer
+    }
+    return hash;
+  }
+  
+  const seenPathHashes = enableDuplicateDetection ? new Set() : null;
 
   for await (const line of rl) {
     if (line.startsWith('#') || line.trim() === '' || line.trim() === '…') continue;
@@ -260,14 +280,18 @@ async function validate() {
 
     // If complete path, validate round-robin and check for duplicates
     if (stack.length === nWeeks) {
-      const pathKey = stack.map(w => w.join(',')).join('|');
-      if (seenPaths.has(pathKey)) {
-        duplicateCount++;
-        if (duplicateCount <= 10) {
-          console.error(`Duplicate path found: ${pathKey.substring(0, 50)}...`);
+      // Duplicate detection (skipped for very large files)
+      if (enableDuplicateDetection) {
+        const pathKey = stack.map(w => w.join(',')).join('|');
+        const pathHash = hashPath(pathKey);
+        if (seenPathHashes.has(pathHash)) {
+          duplicateCount++;
+          if (duplicateCount <= 10) {
+            console.error(`Duplicate path found: ${pathKey.substring(0, 50)}...`);
+          }
+        } else {
+          seenPathHashes.add(pathHash);
         }
-      } else {
-        seenPaths.add(pathKey);
       }
 
       const rrErrors = validateRoundRobin(stack, nTeams);
@@ -285,15 +309,19 @@ async function validate() {
 
   console.log(`\n\nValidation complete:`);
   console.log(`  Paths counted: ${pathCount} (expected: ${header.count})`);
-  console.log(`  Unique paths: ${seenPaths.size}`);
-  console.log(`  Duplicate paths: ${duplicateCount}`);
+  if (enableDuplicateDetection) {
+    console.log(`  Unique paths: ${seenPathHashes.size}`);
+    console.log(`  Duplicate paths: ${duplicateCount}`);
+  } else {
+    console.log(`  Duplicate detection: Skipped (file too large, >10M paths)`);
+  }
   console.log(`  Structure errors: ${errorCount}`);
   console.log(`  Score errors: ${scoreErrors}`);
 
   if (pathCount !== header.count) {
     console.error(`  ERROR: Path count mismatch!`);
   }
-  if (duplicateCount > 0) {
+  if (enableDuplicateDetection && duplicateCount > 0) {
     console.error(`  ERROR: ${duplicateCount} duplicate paths found!`);
   }
   if (errorCount > 0 || scoreErrors > 0) {
