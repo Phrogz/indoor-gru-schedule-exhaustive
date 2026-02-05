@@ -596,7 +596,7 @@ if (!isMainThread) {
       if (debug) {
         parentPort.postMessage({
           type: 'debug',
-          message: `rebuildRoundMatchups week ${weekNum}: gamesRemaining=${gamesRemainingInRound}, usedInRound.size=${usedInRound.size}, week.length=${week.length}`
+          message: `rebuildRoundMatchups week ${weekNum}: gamesRemaining=${gamesRemainingInRound}, usedInRound.size=${usedInRound.size}, week=[${Array.from(week).join(',')}]`
         });
       }
 
