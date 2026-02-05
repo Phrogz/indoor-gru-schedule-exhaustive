@@ -742,7 +742,17 @@ if (!isMainThread) {
 
       parentPort.postMessage({
         type: 'debug',
-        message: `Received work: pathIndex=${pathIndex}, path length=${inputPath.length} weeks`
+        message: `Received work: pathIndex=${pathIndex}, path length=${inputPath.length} weeks, nMatchups=${nMatchups}, nSlots=${nSlots}`
+      });
+
+      // Debug: trace round state computation
+      const debugRoundMatchups = rebuildRoundMatchups(inputPath);
+      const debugGameOffset = startWeek * nSlots;
+      const debugStartRound = Math.floor(debugGameOffset / nMatchups);
+      const debugUsedInRound = debugRoundMatchups.get(debugStartRound) || new Set();
+      parentPort.postMessage({
+        type: 'debug',
+        message: `Round state: gameOffset=${debugGameOffset}, startRound=${debugStartRound}, usedInRound.size=${debugUsedInRound.size}, roundMatchups.keys=[${Array.from(debugRoundMatchups.keys()).join(',')}]`
       });
 
       const result = processWorkUnit(inputPath, skip, breadth);
