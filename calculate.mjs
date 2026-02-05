@@ -206,36 +206,54 @@ class MultiLevelModIterator {
   }
   
   /**
-   * Get path at step using multi-level mod arithmetic.
-   * Each level uses: childIdx = step % childCount
+   * Get path at step using mixed-radix arithmetic for diverse iteration.
+   * 
+   * To visit all paths while maximizing diversity:
+   * - The FIRST dimension (week-1 nodes) cycles fastest: nodeIdx = step % nodeCount
+   * - Later dimensions cycle slower: childIdx = floor(step / priorProduct) % childCount
+   * 
+   * This ensures early steps touch different week-1 branches before revisiting any.
+   * 
+   * NOTE: This assumes roughly uniform child counts at each level. For highly non-uniform
+   * trees, some paths may be visited multiple times while others are skipped.
    */
   getPathAtStep(step) {
     const path = [];
+    
+    // For diverse order, we cycle through week-1 nodes fastest (innermost dimension)
+    // and leaves slowest (outermost dimension).
+    // This is like reading a number in mixed-radix: step = leaf * nodeCount + nodeIdx
+    
+    // Track cumulative product of dimension sizes for mixed-radix indexing
+    let cumulativeProduct = 1;
     
     // Navigate through internal nodes
     for (let depth = 0; depth < this.#weeks - 1; depth++) {
       const nodesAtDepth = this.#nodesByDepth[depth];
       
       if (depth === 0) {
-        // Root level: index directly into all nodes
+        // Root level: cycles fastest (step % nodeCount)
         const nodeIdx = step % nodesAtDepth.length;
         path.push({ node: nodesAtDepth[nodeIdx], idx: nodeIdx });
+        cumulativeProduct = nodesAtDepth.length;
       } else {
-        // Child level: use parent's firstChildIdx + offset
+        // Child level: use mixed-radix indexing
+        // childOffset = floor(step / cumulativeProduct) % childCount
         const parent = path[depth - 1].node;
         if (parent.childCount === 0) {
           console.error(`Parent at depth ${depth - 1} has no children`);
           return null;
         }
-        const childOffset = step % parent.childCount;
+        const childOffset = Math.floor(step / cumulativeProduct) % parent.childCount;
         const nodeIdx = parent.firstChildIdx + childOffset;
         path.push({ node: nodesAtDepth[nodeIdx], idx: nodeIdx });
+        cumulativeProduct *= parent.childCount;
       }
     }
     
-    // Get leaf using O(1) offset lookup
+    // Get leaf using mixed-radix: leafIdx = floor(step / cumulativeProduct) % childCount
     const leafParent = path[this.#weeks - 2].node;
-    const leafChildIdx = step % leafParent.childCount;
+    const leafChildIdx = Math.floor(step / cumulativeProduct) % leafParent.childCount;
     const globalLeafIdx = leafParent.firstLeafIdx + leafChildIdx;
     
     // Direct O(1) access to leaf byte offset
