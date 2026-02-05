@@ -501,6 +501,10 @@ if (!isMainThread) {
   // OPTIMIZATION: Optimal score per week is always [2,4]
   const OPTIMAL_WEEK_SCORE = [2, 4];
 
+  // Track first enumeration for diagnostics
+  let firstEnumeration = true;
+  let enumerationCount = 0;
+
   // Enumerate optimal schedules for given constraints, with caching
   // This is MUCH faster than unconstrained enumeration because:
   // 1. excludeMatchups prunes many branches (matchups already used in round)
@@ -515,7 +519,19 @@ if (!isMainThread) {
     const cached = constraintCache.get(key);
     if (cached !== undefined) return cached;
 
+    // Log first enumeration to help diagnose slowness
+    if (firstEnumeration) {
+      const excludeCount = excludeMatchups.toString(2).split('1').length - 1;
+      parentPort.postMessage({
+        type: 'debug',
+        message: `First enumeration: excludeMatchups=${excludeCount} bits set, requiredMatchups=${requiredMatchups.size} items`
+      });
+      firstEnumeration = false;
+    }
+    enumerationCount++;
+
     // Cache miss: enumerate with constraints (fast due to pruning)
+    const startTime = Date.now();
     const result = [];
     enumerateSchedules({
       excludeMatchups,
@@ -527,6 +543,15 @@ if (!isMainThread) {
         }
       }
     });
+
+    // Log slow enumerations
+    const elapsed = Date.now() - startTime;
+    if (elapsed > 1000) {
+      parentPort.postMessage({
+        type: 'debug',
+        message: `Slow enumeration #${enumerationCount}: ${elapsed}ms, found ${result.length} optimal schedules`
+      });
+    }
 
     constraintCache.set(key, result);
     return result;
@@ -715,6 +740,11 @@ if (!isMainThread) {
     if (msg.type === 'work') {
       const { inputPath, pathIndex, skipOffset: skip, breadth } = msg;
 
+      parentPort.postMessage({
+        type: 'debug',
+        message: `Received work: pathIndex=${pathIndex}, path length=${inputPath.length} weeks`
+      });
+
       const result = processWorkUnit(inputPath, skip, breadth);
 
       parentPort.postMessage({
@@ -732,6 +762,7 @@ if (!isMainThread) {
 
   // Signal ready to receive work
   parentPort.postMessage({ type: 'ready' });
+  parentPort.postMessage({ type: 'debug', message: 'Worker initialized and ready' });
 }
 
 // Main thread logic
@@ -1328,6 +1359,9 @@ if (isMainThread && import.meta.url === `file://${process.argv[1]}`) {
                 finishUp();
               }
             }
+          } else if (msg.type === 'debug') {
+            // Debug message from worker
+            console.log(`\n  [Worker ${i}] ${msg.message}`);
           } else if (msg.type === 'optimal') {
             // Worker found optimal paths - write them
             const week0 = msg.week0;
