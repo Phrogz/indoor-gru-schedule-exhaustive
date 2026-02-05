@@ -26,22 +26,22 @@ import { TreeWriter, TreeReader, parseHeader, readHeaderFromFile } from './lib/t
 
 /**
  * Build a tree index from a results file for multi-level mod iteration.
- * 
+ *
  * Structure: For each internal node, store:
  *   - schedule: the matchup array for this week
  *   - childCount: number of children (next level nodes or leaves)
  *   - firstChildIdx: index of first child in the next level's array (for internal children)
  *   - firstLeafIdx: global leaf index of first leaf child (for leaf parents)
- * 
+ *
  * Also stores leafOffsets: Float64Array of byte offsets for ALL leaves (O(1) access)
- * 
+ *
  * @param {string} filePath - Path to tree-format results file
  * @returns {Promise<{header, nodesByDepth, leafOffsets, totalPaths}>}
  */
 async function buildTreeIndex(filePath) {
   console.log('  Building tree index for diverse iteration...');
   const startTime = performance.now();
-  
+
   const rl = createInterface({
     input: createReadStream(filePath),
     crlfDelay: Infinity
@@ -50,31 +50,31 @@ async function buildTreeIndex(filePath) {
   let header = null;
   let totalPaths = 0;
   let currentByteOffset = 0;
-  
+
   // nodesByDepth[d] = [{schedule, childCount, firstChildIdx, firstLeafIdx}, ...]
   const nodesByDepth = [];
-  
+
   // Store byte offsets for ALL leaves - enables O(1) access
   // Using regular array first (will convert to Float64Array after knowing size)
   const leafOffsetsList = [];
-  
+
   // Stack: [{depth, nodeIndex}] - tracks current position in tree
   const stack = [];
-  
+
   let lineCount = 0;
   let lastProgressTime = startTime;
 
   for await (const line of rl) {
     const lineBytes = Buffer.byteLength(line, 'utf8') + 1;
     lineCount++;
-    
+
     const now = performance.now();
     if (now - lastProgressTime > 2000) {
       const memUsed = (leafOffsetsList.length * 8 / 1024 / 1024).toFixed(0);
       process.stdout.write(`\r    ${lineCount.toLocaleString()} lines, ${leafOffsetsList.length.toLocaleString()} leaves (~${memUsed} MB)...   `);
       lastProgressTime = now;
     }
-    
+
     if (line.startsWith('#')) {
       header = parseHeader(line);
       for (let d = 0; d < header.weeks - 1; d++) {
@@ -83,31 +83,31 @@ async function buildTreeIndex(filePath) {
       currentByteOffset += lineBytes;
       continue;
     }
-    
+
     if (line.trim() === '' || line.trim() === '…') {
       currentByteOffset += lineBytes;
       continue;
     }
-    
+
     let depth = 0;
     while (line[depth] === '\t') depth++;
-    
+
     const content = line.slice(depth);
     const schedule = content.split(',').map(n => parseInt(n.trim(), 10));
-    
+
     // Pop stack to current depth
     while (stack.length > depth) {
       stack.pop();
     }
-    
+
     const isLeaf = depth === header.weeks - 1;
-    
+
     if (isLeaf) {
       // Record leaf byte offset for O(1) access later
       const globalLeafIdx = leafOffsetsList.length;
       leafOffsetsList.push(currentByteOffset);
       totalPaths++;
-      
+
       // Update leaf parent's child count and firstLeafIdx
       if (stack.length > 0) {
         const parent = stack[stack.length - 1];
@@ -126,7 +126,7 @@ async function buildTreeIndex(filePath) {
         firstLeafIdx: -1    // For leaf children (only leaf parents use this)
       };
       nodesByDepth[depth].push(node);
-      
+
       // Link from parent
       if (stack.length > 0) {
         const parent = stack[stack.length - 1];
@@ -136,33 +136,33 @@ async function buildTreeIndex(filePath) {
           parentNode.firstChildIdx = nodeIndex;
         }
       }
-      
+
       stack.push({ depth, nodeIndex });
     }
-    
+
     currentByteOffset += lineBytes;
   }
-  
+
   // Convert to typed array for memory efficiency
   const leafOffsets = new Float64Array(leafOffsetsList);
-  
+
   const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
   const totalNodes = nodesByDepth.reduce((sum, level) => sum + level.length, 0);
   const leafMemMB = (leafOffsets.byteLength / 1024 / 1024).toFixed(1);
   const nodeMemMB = (totalNodes * 50 / 1024 / 1024).toFixed(1);
-  
+
   process.stdout.write(`\r    Indexed ${totalNodes.toLocaleString()} nodes + ${totalPaths.toLocaleString()} leaves in ${elapsed}s (${leafMemMB} MB offsets + ~${nodeMemMB} MB nodes)   \n`);
-  
+
   // Log tree shape
   for (let d = 0; d < nodesByDepth.length; d++) {
     const nodes = nodesByDepth[d];
     const childCounts = nodes.map(n => n.childCount);
-    const avgChildren = childCounts.length > 0 
+    const avgChildren = childCounts.length > 0
       ? (childCounts.reduce((a, b) => a + b, 0) / childCounts.length).toFixed(1)
       : 0;
     console.log(`    Depth ${d} (Week ${d + 1}): ${nodes.length.toLocaleString()} nodes, avg ${avgChildren} children`);
   }
-  
+
   return { header, nodesByDepth, leafOffsets, totalPaths };
 }
 
@@ -178,7 +178,7 @@ class MultiLevelModIterator {
   #weeks;
   #fd = null;
   #buffer = null;
-  
+
   constructor(filePath, treeIndex) {
     this.#filePath = filePath;
     this.#nodesByDepth = treeIndex.nodesByDepth;
@@ -187,50 +187,50 @@ class MultiLevelModIterator {
     this.#weeks = treeIndex.header.weeks;
     this.#buffer = Buffer.alloc(256);  // Enough for one schedule line
   }
-  
+
   get totalPaths() {
     return this.#totalPaths;
   }
-  
+
   open() {
     if (!this.#fd) {
       this.#fd = openSync(this.#filePath, 'r');
     }
   }
-  
+
   close() {
     if (this.#fd) {
       closeSync(this.#fd);
       this.#fd = null;
     }
   }
-  
+
   /**
    * Get path at step using mixed-radix arithmetic for diverse iteration.
-   * 
+   *
    * To visit all paths while maximizing diversity:
    * - The FIRST dimension (week-1 nodes) cycles fastest: nodeIdx = step % nodeCount
    * - Later dimensions cycle slower: childIdx = floor(step / priorProduct) % childCount
-   * 
+   *
    * This ensures early steps touch different week-1 branches before revisiting any.
-   * 
+   *
    * NOTE: This assumes roughly uniform child counts at each level. For highly non-uniform
    * trees, some paths may be visited multiple times while others are skipped.
    */
   getPathAtStep(step) {
     const path = [];
-    
+
     // For diverse order, we cycle through week-1 nodes fastest (innermost dimension)
     // and leaves slowest (outermost dimension).
     // This is like reading a number in mixed-radix: step = leaf * nodeCount + nodeIdx
-    
+
     // Track cumulative product of dimension sizes for mixed-radix indexing
     let cumulativeProduct = 1;
-    
+
     // Navigate through internal nodes
     for (let depth = 0; depth < this.#weeks - 1; depth++) {
       const nodesAtDepth = this.#nodesByDepth[depth];
-      
+
       if (depth === 0) {
         // Root level: cycles fastest (step % nodeCount)
         const nodeIdx = step % nodesAtDepth.length;
@@ -250,40 +250,40 @@ class MultiLevelModIterator {
         cumulativeProduct *= parent.childCount;
       }
     }
-    
+
     // Get leaf using mixed-radix: leafIdx = floor(step / cumulativeProduct) % childCount
     const leafParent = path[this.#weeks - 2].node;
     const leafChildIdx = Math.floor(step / cumulativeProduct) % leafParent.childCount;
     const globalLeafIdx = leafParent.firstLeafIdx + leafChildIdx;
-    
+
     // Direct O(1) access to leaf byte offset
     const leafByteOffset = this.#leafOffsets[globalLeafIdx];
     const leafSchedule = this.#readLeafAt(leafByteOffset);
-    
+
     // Build final path as array of schedules
     const result = path.map(p => p.node.schedule);
     result.push(leafSchedule);
-    
+
     return { index: step, path: result };
   }
-  
+
   /**
    * Read a single leaf schedule at a known byte offset - O(1) operation
    */
   #readLeafAt(byteOffset) {
     if (!this.#fd) this.open();
-    
+
     const bytesRead = readSync(this.#fd, this.#buffer, 0, this.#buffer.length, byteOffset);
     if (bytesRead === 0) return null;
-    
+
     // Find line end
     let lineEnd = 0;
     while (lineEnd < bytesRead && this.#buffer[lineEnd] !== 10) lineEnd++;
-    
+
     // Skip leading tabs
     let start = 0;
     while (start < lineEnd && this.#buffer[start] === 9) start++;
-    
+
     const content = this.#buffer.toString('utf8', start, lineEnd);
     return content.split(',').map(n => parseInt(n.trim(), 10));
   }
@@ -371,7 +371,7 @@ const CONTINUATION_MULTIPLIERS = {
   8: {
     2: 32,       // Week 2 continuations per week 1
     3: 125,      // Week 3 continuations per week 2 (measured: 5.75M unique / 46K paths)
-    4: 81944.69, // Week 4 continuations per week 3
+    4: 9147,     // Week 4 continuations per week 3
     5: 22.73,    // Week 5 continuations per week 4
     6: 201600,   // Week 6 continuations per week 5
   }
@@ -496,7 +496,7 @@ function enumerateSchedules(options) {
 
   function backtrack(slot) {
     if (stopped) return;  // Early exit if callback requested stop
-    
+
     if (slot === N_SLOTS) {
       // Verify all required matchups were placed
       for (let ti = 0; ti < N_TEAMS; ti++) {
@@ -909,6 +909,7 @@ if (!isMainThread) {
   let schedulesChecked = 0;  // Track total continuations checked
   let skipOffset = 0;
   let breadthLimit = 0;
+  let diversifyStep = 0;  // Used to start enumeration at diverse positions
   let breadthReached = false;
   let currentWeek0Optimal = [];
 
@@ -956,53 +957,40 @@ if (!isMainThread) {
     const gameOffset = weekNum * nSlots;
     const { excludeMatchups, requiredMatchups } = getRoundConstraints(gameOffset, roundMatchups);
 
-    if (breadthLimit > 0) {
-      // BREADTH-LIMITED: Enumerate on-demand with early termination
-      // Don't cache since we may stop early with partial results
-      enumerateSchedules({
-        excludeMatchups,
-        requiredMatchups,
-        onSchedule: (sched) => {
-          if (breadthReached) return false;  // Stop enumeration
-          
-          schedulesChecked++;  // Count every schedule considered
-          
-          const score = scoreSchedule(sched);
-          if (score.doubleByes !== OPTIMAL_WEEK_SCORE[0] || score.fiveSlotTeams !== OPTIMAL_WEEK_SCORE[1]) {
-            return;  // Not optimal (discarded), continue enumeration
-          }
-          
-          const weekMatchups = Array.from(sched);
-          const newRoundMatchups = updateRoundMatchups(weekNum, weekMatchups, roundMatchups, requiredMatchups);
-          const newWeeks = weeks.concat([new Uint8Array(sched)]);
-          enumerateFromPath(week0, weekNum + 1, newRoundMatchups, newWeeks);
-          
-          return breadthReached ? false : undefined;  // Stop if we hit breadth limit
-        }
-      });
-    } else {
-      // EXHAUSTIVE: Use cached results for speed
-      const validSchedules = getValidOptimalWeeks(excludeMatchups, requiredMatchups);
-      schedulesChecked += validSchedules.length;
+    // Always use cached results for consistent ordering - this enables diversification
+    // Caching is fast due to constraint pruning (excludeMatchups, requiredMatchups)
+    const validSchedules = getValidOptimalWeeks(excludeMatchups, requiredMatchups);
+    schedulesChecked += validSchedules.length;
+    
+    if (validSchedules.length === 0) return;
 
-      for (const sched of validSchedules) {
-        if (breadthReached) return;
+    // For breadth-limited mode with diversification:
+    // Start iterating from a diversified position based on diversifyStep
+    // This ensures different input paths explore different week orderings first
+    const startIdx = diversifyStep % validSchedules.length;
+    
+    for (let i = 0; i < validSchedules.length; i++) {
+      if (breadthReached) return;
 
-        const weekMatchups = Array.from(sched);
-        const newRoundMatchups = updateRoundMatchups(weekNum, weekMatchups, roundMatchups, requiredMatchups);
-        const newWeeks = weeks.concat([new Uint8Array(sched)]);
-        enumerateFromPath(week0, weekNum + 1, newRoundMatchups, newWeeks);
-      }
+      // Wrap around: start from startIdx, then continue to end, then from 0
+      const schedIdx = (startIdx + i) % validSchedules.length;
+      const sched = validSchedules[schedIdx];
+
+      const weekMatchups = Array.from(sched);
+      const newRoundMatchups = updateRoundMatchups(weekNum, weekMatchups, roundMatchups, requiredMatchups);
+      const newWeeks = weeks.concat([new Uint8Array(sched)]);
+      enumerateFromPath(week0, weekNum + 1, newRoundMatchups, newWeeks);
     }
   }
 
   // Process a single work unit (one input path with skipOffset and breadth)
-  function processWorkUnit(inputPath, skip, breadth) {
+  function processWorkUnit(inputPath, skip, breadth, divStep = 0) {
     // Reset state for this work unit
     optimalCount = 0;
     schedulesChecked = 0;  // Reset counter for this work unit
     skipOffset = skip;
     breadthLimit = breadth;
+    diversifyStep = divStep;  // Used to start enumeration at diverse positions
     breadthReached = false;
     currentWeek0Optimal = [];
 
@@ -1035,8 +1023,8 @@ if (!isMainThread) {
   // Message-based work loop: wait for work assignments from main thread
   parentPort.on('message', (msg) => {
     if (msg.type === 'work') {
-      const { inputPath, pathIndex, skipOffset: skip, breadth } = msg;
-      const result = processWorkUnit(inputPath, skip, breadth);
+      const { inputPath, pathIndex, skipOffset: skip, breadth, diversifyStep: divStep } = msg;
+      const result = processWorkUnit(inputPath, skip, breadth, divStep || 0);
 
       parentPort.postMessage({
         type: 'result',
@@ -1462,22 +1450,22 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
       // Load ALL source paths, filtering and marking appropriately
       console.log(`  Loading source paths from ${resumeData.sourceFile}...`);
       const sourceReader = new TreeReader(resumeData.sourceFile);
-      
+
       inMemoryPaths = [];
       let skippedComplete = 0;
       let resumeIncomplete = 0;
       let addedUnprocessed = 0;
-      
+
       for await (const path of sourceReader.paths()) {
         // Build key in same format as findIncompleteBranches uses
         const key = path.map(s => s.join(',')).join('|');
-        
+
         if (completedKeys.has(key)) {
           // This path was fully explored - skip it
           skippedComplete++;
           continue;
         }
-        
+
         if (incompleteKeys.has(key)) {
           // This path was partially explored - add it (will resume with skip offset)
           resumeIncomplete++;
@@ -1485,10 +1473,10 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
           // This path was never started - add it fresh
           addedUnprocessed++;
         }
-        
+
         inMemoryPaths.push(path);
       }
-      
+
       console.log(`  Source: ${skippedComplete} complete (skip), ${resumeIncomplete} incomplete (resume), ${addedUnprocessed} unprocessed (new)`);
       totalInputPaths = inMemoryPaths.length;
     } else if (priorFile && existsSync(priorFile) && !VALIDATE) {
@@ -1496,7 +1484,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
       sourceFile = priorFile;
       const treeIndex = await buildTreeIndex(priorFile);
       totalInputPaths = treeIndex.totalPaths;
-      
+
       // Create multi-level mod iterator for diverse path ordering
       var modIterator = new MultiLevelModIterator(priorFile, treeIndex);
       modIterator.open();
@@ -1524,14 +1512,14 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     let pathIterator = null;
     let currentPathIndex = 0;
     let roundComplete = false;
-    
+
     // Queue to serialize getNextWork() calls (prevents readline race conditions)
     let workQueue = Promise.resolve();
 
     async function* createPathIterator() {
       if (inMemoryPaths) {
         for (let i = 0; i < inMemoryPaths.length; i++) {
-          yield { index: i, path: inMemoryPaths[i] };
+          yield { index: i, path: inMemoryPaths[i], diversifyStep: i };
         }
       } else if (modIterator) {
         // Multi-level mod iteration for diverse coverage
@@ -1548,7 +1536,8 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
             if (!dispatchedPathKeys.has(pathKey)) {
               dispatchedPathKeys.add(pathKey);
               // Use sequential index for unique paths (not step, which has gaps)
-              yield { index: uniqueIndex++, path: result.path };
+              // Pass step (not uniqueIndex) as diversifyStep to maximize spread
+              yield { index: uniqueIndex++, path: result.path, diversifyStep: step };
             } else {
               duplicatesSkipped++;
             }
@@ -1566,7 +1555,8 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
         const reader = new TreeReader(sourceFile);
         let idx = 0;
         for await (const path of reader.paths()) {
-          yield { index: idx++, path };
+          yield { index: idx, path, diversifyStep: idx };
+          idx++;
         }
       }
     }
@@ -1602,7 +1592,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
           }
         }
 
-        const { index, path } = next.value;
+        const { index, path, diversifyStep } = next.value;
         currentPathIndex = index;
 
         if (!isComplete[index]) {
@@ -1610,20 +1600,21 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
             pathIndex: index,
             inputPath: path,
             skipOffset: foundCounts[index],
-            breadth: BREADTH
+            breadth: BREADTH,
+            diversifyStep: diversifyStep || index
           };
         }
         // Path already complete, continue to next
       }
     }
-    
+
     // Serialized wrapper to prevent concurrent iterator access (readline race condition)
     async function getNextWork() {
       // Chain onto the queue - each caller waits for all previous to finish
       const myTurn = workQueue;
       let signalDone;
       workQueue = new Promise(resolve => { signalDone = resolve; });
-      
+
       await myTurn;
       try {
         return await getNextWorkInternal();
@@ -1748,13 +1739,13 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
             // Worker found optimal paths - write them
             // Skip if shutting down (workers terminated, messages may be corrupted)
             if (shuttingDown) return;
-            
+
             const week0 = msg.week0;
             const pathsToWrite = [];
 
             for (const laterWeeks of msg.continuations) {
               const fullPath = [week0, ...laterWeeks];
-              
+
               // Validate path structure (guards against corrupted messages during shutdown)
               let valid = true;
               for (const week of fullPath) {
@@ -1794,7 +1785,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
             // If path hit breadth limit (not complete), write … marker immediately
             if (!pathComplete && workerCurrentPath[i] && optimalWriter) {
               const inputPath = workerCurrentPath[i];
-              
+
               // Find common prefix with last written path
               let commonDepth = 0;
               if (lastWrittenPath) {
@@ -1809,12 +1800,12 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
               for (let depth = commonDepth; depth < inputPath.length; depth++) {
                 optimalWriter.writeNode(depth, inputPath[depth]);
               }
-              
+
               // Write incomplete marker at the next depth (where continuations would go)
               optimalWriter.writeIncompleteMarker(inputPath.length);
-              
+
               lastWrittenPath = inputPath.map(s => Array.from(s));
-              
+
               // Track for resume
               incompletePathsMap.set(pathIndex, inputPath);
             } else if (pathComplete) {
@@ -1872,7 +1863,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
         const inFlightPaths = workerCurrentPath.filter(p => p !== null);
         const breadthLimitPaths = Array.from(incompletePathsMap.values());
         const allIncompletePaths = [...inFlightPaths, ...breadthLimitPaths];
-        
+
         console.log(`  ${inFlightPaths.length} in-flight + ${breadthLimitPaths.length} breadth-limited = ${allIncompletePaths.length} incomplete paths`);
 
         finalizeOptimalFile(false, allIncompletePaths).then(() => {
@@ -1912,7 +1903,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     const warmupTime = fwt ? (fwt - workerStart) / 1000 : totalElapsed;
     const activeTime = fwt ? (performance.now() - fwt) / 1000 : 0;
 
-    const timeStr = fwt 
+    const timeStr = fwt
       ? `${formatDuration(totalElapsed)} total (${formatDuration(warmupTime)} warmup + ${formatDuration(activeTime)} active)`
       : formatDuration(totalElapsed);
     console.log(`\nCompleted in ${timeStr}`);
