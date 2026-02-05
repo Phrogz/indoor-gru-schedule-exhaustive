@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 // Validate saved schedule results for correctness
-// Usage: node scripts/validate-results.mjs results/6teams-3weeks.txt
+// Usage: node scripts/validate-results.mjs results/6teams-3weeks.txt [--fix]
+// With --fix: removes invalid paths and rewrites the file
 
-import { createReadStream } from 'fs';
+import { createReadStream, writeFileSync, renameSync } from 'fs';
 import { createInterface } from 'readline';
 
-const filePath = process.argv[2];
+const args = process.argv.slice(2);
+const fixMode = args.includes('--fix');
+const filePath = args.find(a => !a.startsWith('--'));
+
 if (!filePath) {
-  console.error('Usage: node scripts/validate-results.mjs <results-file>');
+  console.error('Usage: node scripts/validate-results.mjs <results-file> [--fix]');
+  console.error('  --fix: Remove invalid paths and rewrite the file');
   process.exit(1);
 }
 
@@ -212,7 +217,7 @@ function validateRoundRobin(weeks, nTeams) {
 // Main validation
 async function validate() {
   const header = await parseHeader(filePath);
-  console.log(`Validating: ${filePath}`);
+  console.log(`Validating: ${filePath}${fixMode ? ' [FIX MODE]' : ''}`);
   console.log(`  Teams: ${header.teams}, Weeks: ${header.weeks}, Expected count: ${header.count}`);
   
   if (header.count > 10_000_000) {
@@ -228,9 +233,14 @@ async function validate() {
 
   const stack = [];
   let pathCount = 0;
+  let validPathCount = 0;
   let errorCount = 0;
   let duplicateCount = 0;
   let scoreErrors = 0;
+  let roundRobinErrors = 0;
+  
+  // For --fix mode: collect valid paths
+  const validPaths = fixMode ? [] : null;
   
   // For very large files (>10M paths), skip duplicate detection to avoid Set size limits
   // Structure validation is more important and will catch most issues
@@ -264,29 +274,30 @@ async function validate() {
 
     // Validate this week
     const weekErrors = validateWeek(schedule, nTeams, nSlots, depth, pathCount);
-    if (weekErrors.length > 0) {
+    if (weekErrors.length > 0 && !fixMode) {
       console.error(`Path ${pathCount}, Week ${depth}:`, weekErrors);
-      errorCount += weekErrors.length;
     }
 
     // Check week score
     const weekScore = scoreWeek(schedule, nTeams);
-    if (weekScore.doubleByes !== expectedPerWeekScore[0] || weekScore.fiveSlotTeams !== expectedPerWeekScore[1]) {
-      if (scoreErrors < 10) {
-        console.error(`Path ${pathCount}, Week ${depth}: Score [${weekScore.doubleByes},${weekScore.fiveSlotTeams}] != expected [${expectedPerWeekScore}]`);
-      }
-      scoreErrors++;
+    const hasScoreError = weekScore.doubleByes !== expectedPerWeekScore[0] || weekScore.fiveSlotTeams !== expectedPerWeekScore[1];
+    if (hasScoreError && !fixMode && scoreErrors < 10) {
+      console.error(`Path ${pathCount}, Week ${depth}: Score [${weekScore.doubleByes},${weekScore.fiveSlotTeams}] != expected [${expectedPerWeekScore}]`);
     }
 
     // If complete path, validate round-robin and check for duplicates
     if (stack.length === nWeeks) {
+      let pathHasErrors = weekErrors.length > 0 || hasScoreError;
+      
       // Duplicate detection (skipped for very large files)
+      let isDuplicate = false;
       if (enableDuplicateDetection) {
         const pathKey = stack.map(w => w.join(',')).join('|');
         const pathHash = hashPath(pathKey);
         if (seenPathHashes.has(pathHash)) {
+          isDuplicate = true;
           duplicateCount++;
-          if (duplicateCount <= 10) {
+          if (duplicateCount <= 10 && !fixMode) {
             console.error(`Duplicate path found: ${pathKey.substring(0, 50)}...`);
           }
         } else {
@@ -296,8 +307,23 @@ async function validate() {
 
       const rrErrors = validateRoundRobin(stack, nTeams);
       if (rrErrors.length > 0) {
-        console.error(`Path ${pathCount}:`, rrErrors);
-        errorCount += rrErrors.length;
+        if (!fixMode) {
+          console.error(`Path ${pathCount}:`, rrErrors);
+        }
+        roundRobinErrors++;
+        pathHasErrors = true;
+      }
+      
+      // Count errors
+      if (weekErrors.length > 0) errorCount += weekErrors.length;
+      if (hasScoreError) scoreErrors++;
+      
+      // Track valid paths for --fix mode
+      if (fixMode && !pathHasErrors && !isDuplicate) {
+        validPaths.push(stack.map(w => [...w]));
+        validPathCount++;
+      } else if (!pathHasErrors && !isDuplicate) {
+        validPathCount++;
       }
 
       pathCount++;
@@ -309,27 +335,78 @@ async function validate() {
 
   console.log(`\n\nValidation complete:`);
   console.log(`  Paths counted: ${pathCount} (expected: ${header.count})`);
+  console.log(`  Valid paths: ${validPathCount}`);
+  console.log(`  Invalid paths: ${pathCount - validPathCount}`);
   if (enableDuplicateDetection) {
-    console.log(`  Unique paths: ${seenPathHashes.size}`);
     console.log(`  Duplicate paths: ${duplicateCount}`);
   } else {
     console.log(`  Duplicate detection: Skipped (file too large, >10M paths)`);
   }
   console.log(`  Structure errors: ${errorCount}`);
   console.log(`  Score errors: ${scoreErrors}`);
+  console.log(`  Round-robin errors: ${roundRobinErrors}`);
 
   if (pathCount !== header.count) {
-    console.error(`  ERROR: Path count mismatch!`);
+    console.error(`  WARNING: Path count mismatch!`);
   }
-  if (enableDuplicateDetection && duplicateCount > 0) {
-    console.error(`  ERROR: ${duplicateCount} duplicate paths found!`);
-  }
-  if (errorCount > 0 || scoreErrors > 0) {
-    console.error(`  ERROR: Validation failed!`);
+  
+  // --fix mode: rewrite file with only valid paths
+  if (fixMode && validPathCount > 0 && validPathCount < pathCount) {
+    console.log(`\n  Writing ${validPathCount} valid paths to ${filePath}...`);
+    
+    // Sort paths for consistent tree output
+    validPaths.sort((a, b) => {
+      for (let w = 0; w < a.length; w++) {
+        const aKey = a[w].join(',');
+        const bKey = b[w].join(',');
+        if (aKey < bKey) return -1;
+        if (aKey > bKey) return 1;
+      }
+      return 0;
+    });
+    
+    // Write in tree format
+    const lines = [`# teams=${nTeams} weeks=${nWeeks} count=${validPathCount}`];
+    let lastPath = null;
+    
+    for (const path of validPaths) {
+      // Find common prefix with last path
+      let commonDepth = 0;
+      if (lastPath) {
+        while (commonDepth < lastPath.length && 
+               commonDepth < path.length &&
+               lastPath[commonDepth].join(',') === path[commonDepth].join(',')) {
+          commonDepth++;
+        }
+      }
+      
+      // Write from divergence point
+      for (let d = commonDepth; d < path.length; d++) {
+        lines.push('\t'.repeat(d) + path[d].join(','));
+      }
+      lastPath = path;
+    }
+    
+    // Backup original and write new
+    const backupPath = filePath + '.backup';
+    renameSync(filePath, backupPath);
+    writeFileSync(filePath, lines.join('\n') + '\n');
+    console.log(`  Original backed up to ${backupPath}`);
+    console.log(`  ✓ Fixed file written with ${validPathCount} valid paths`);
+  } else if (fixMode && validPathCount === 0) {
+    console.error(`  ERROR: No valid paths found! File not modified.`);
     process.exit(1);
+  } else if (fixMode && validPathCount === pathCount) {
+    console.log(`  All paths already valid, no changes needed.`);
+  } else if (errorCount > 0 || scoreErrors > 0 || roundRobinErrors > 0) {
+    console.error(`  ERROR: Validation failed!`);
+    if (!fixMode) {
+      console.error(`  Run with --fix to remove invalid paths`);
+    }
+    process.exit(1);
+  } else {
+    console.log(`  ✓ All paths valid`);
   }
-
-  console.log(`  ✓ All paths valid`);
 }
 
 validate().catch(err => {

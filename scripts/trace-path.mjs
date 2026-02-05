@@ -1,72 +1,64 @@
 #!/usr/bin/env node
-// Trace round-robin logic for a specific path
+// Trace round-robin logic for a specific path with cumulative matchup grids
 
+// First path from 8teams-3weeks.txt
 const weeks = [
-  [0,6,12,2,8,26,20,15,22,16,23,14],
-  [21,13,17,18,24,1,9,4,5,10,11,25],
-  [0,1,7,3,9,15,24,19,25,21,27,20],
-  [11,25,9,23,10,22,13,2,17,21,1,6]
+  [0,1,7,2,8,14,19,23,24,25,26,27],   // Week 0
+  [13,16,20,17,21,5,12,3,4,9,10,22],  // Week 1
+  [0,5,11,6,12,16,21,14,15,18,19,22]  // Week 2
 ];
 
 const nTeams = 8;
-const nMatchups = (nTeams * (nTeams - 1)) / 2;  // 28
-const nSlots = (nTeams * 3) / 2;  // 12
+const TEAMS = 'ABCDEFGH';
 
-console.log('nMatchups:', nMatchups, 'nSlots:', nSlots);
-console.log();
+// Decode matchup index to team pair
+function decodeMatchup(m) {
+  let idx = 0;
+  for (let t1 = 0; t1 < nTeams - 1; t1++) {
+    for (let t2 = t1 + 1; t2 < nTeams; t2++) {
+      if (idx === m) return [t1, t2];
+      idx++;
+    }
+  }
+}
 
-let currentRound = 0;
-let usedInRound = new Set();
+// Build cumulative grid: grid[t1][t2] = how many times t1 and t2 have played
+const grid = [];
+for (let i = 0; i < nTeams; i++) {
+  grid.push(new Array(nTeams).fill(0));
+}
+
+function printGrid(weekNum) {
+  console.log(`\nAfter Week ${weekNum}:`);
+  console.log('    ' + TEAMS.split('').join(' '));
+  for (let t1 = 0; t1 < nTeams; t1++) {
+    let row = TEAMS[t1] + '  ';
+    for (let t2 = 0; t2 < nTeams; t2++) {
+      if (t1 === t2) {
+        row += ' -';
+      } else {
+        row += ' ' + grid[t1][t2];
+      }
+    }
+    console.log(row);
+  }
+}
+
+console.log('8 teams: ' + TEAMS + '\n');
 
 for (let weekNum = 0; weekNum < weeks.length; weekNum++) {
   const week = weeks[weekNum];
-  const weekMatchups = new Set(week);
-
-  const remainingInRound = nMatchups - usedInRound.size;
-  console.log(`Week ${weekNum}: usedInRound.size=${usedInRound.size}, remainingInRound=${remainingInRound}`);
-  console.log(`  Matchups in week: ${week.join(',')}`);
-
-  if (remainingInRound <= nSlots) {
-    console.log(`  -> Completing round ${currentRound}`);
-
-    // Required matchups to complete current round
-    const required = [];
-    for (let m = 0; m < nMatchups; m++) {
-      if (!usedInRound.has(m)) required.push(m);
-    }
-    console.log(`  Required: ${required.join(',')}`);
-
-    const missingRequired = required.filter(m => !weekMatchups.has(m));
-    if (missingRequired.length > 0) {
-      console.log(`  ❌ Missing required: ${missingRequired.join(',')}`);
-    }
-
-    // Mark required as used in current round
-    for (const m of required) {
-      if (weekMatchups.has(m)) {
-        usedInRound.add(m);
-      }
-    }
-
-    // Extras start next round
-    const extras = week.filter(m => !required.includes(m));
-    console.log(`  Extras starting round ${currentRound + 1}: ${extras.join(',')}`);
-
-    currentRound++;
-    usedInRound = new Set(extras);
-    console.log(`  Now in round ${currentRound}, usedInRound: {${[...usedInRound].join(',')}}`);
-  } else {
-    console.log(`  -> Adding to round ${currentRound}`);
-
-    const reused = week.filter(m => usedInRound.has(m));
-    if (reused.length > 0) {
-      console.log(`  ❌ Reused in round: ${reused.join(',')}`);
-    }
-
-    for (const m of week) {
-      usedInRound.add(m);
-    }
-    console.log(`  usedInRound now has ${usedInRound.size} matchups`);
+  
+  console.log(`Week ${weekNum}: [${week.join(',')}]`);
+  console.log(`  Games: ${week.map(m => { const [t1,t2] = decodeMatchup(m); return TEAMS[t1]+'v'+TEAMS[t2]; }).join(' ')}`);
+  
+  // Update grid
+  for (const m of week) {
+    const [t1, t2] = decodeMatchup(m);
+    grid[t1][t2]++;
+    grid[t2][t1]++;
   }
+  
+  printGrid(weekNum);
   console.log();
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// Trace through calculate.mjs logic to understand why invalid week 3 was generated
+// Trace through calculate.mjs logic to verify constraint tracking
+// Usage: node scripts/trace-generator.mjs [weeks...]
+// Example: node scripts/trace-generator.mjs "0,1,7,2,8,14,19,23,24,25,26,27" "13,16,20,17,21,5,12,3,4,9,10,22" "0,5,11,6,12,16,21,14,15,18,19,22"
 
 const TEAMS = 'ABCDEFGHIJKLMNOP';
 const N_TEAMS = 8;
@@ -22,108 +24,26 @@ function formatMatchup(m) {
   return `${TEAMS[t1]}v${TEAMS[t2]}`;
 }
 
-// This is the FIXED rebuildRoundMatchups from calculate.mjs
-function rebuildRoundMatchups(path) {
-  const roundMatchups = new Map();
-  let currentRound = 0;
-  let usedInRound = new Set();
-
-  console.log('='.repeat(70));
-  console.log('rebuildRoundMatchups - simulating FIXED calculate.mjs logic');
-  console.log('='.repeat(70));
-
-  for (let weekNum = 0; weekNum < path.length; weekNum++) {
-    const week = path[weekNum];
-    const gamesRemainingInRound = N_MATCHUPS - usedInRound.size;
-
-    console.log(`\nWeek ${weekNum}: [${week.join(',')}]`);
-    console.log(`  currentRound=${currentRound}, usedInRound.size=${usedInRound.size}, gamesRemainingInRound=${gamesRemainingInRound}`);
-
-    if (gamesRemainingInRound <= N_SLOTS) {
-      // This week straddles rounds - process required first, then extras
-      const required = new Set();
-      for (let m = 0; m < N_MATCHUPS; m++) {
-        if (!usedInRound.has(m)) required.add(m);
-      }
-      console.log(`  STRADDLING: required=[${[...required].join(',')}]`);
-
-      // First pass: add all required matchups to complete current round
-      console.log(`  First pass - adding required matchups:`);
-      for (const m of week) {
-        if (required.has(m)) {
-          usedInRound.add(m);
-          console.log(`    m=${m} (${formatMatchup(m)}): REQUIRED → add to round ${currentRound}, usedInRound.size=${usedInRound.size}`);
-        }
-      }
-
-      // Round should now be complete
-      if (usedInRound.size === N_MATCHUPS) {
-        roundMatchups.set(currentRound, new Set(usedInRound));
-        console.log(`  *** Round ${currentRound} COMPLETE (${usedInRound.size} matchups). Saving and incrementing.`);
-        currentRound++;
-        usedInRound = new Set();
-      }
-
-      // Second pass: add all extras to start new round
-      console.log(`  Second pass - adding extras to round ${currentRound}:`);
-      for (const m of week) {
-        if (!required.has(m)) {
-          usedInRound.add(m);
-          console.log(`    m=${m} (${formatMatchup(m)}): EXTRA → add to round ${currentRound}, usedInRound.size=${usedInRound.size}`);
-        }
-      }
-    } else {
-      // All matchups go to current round
-      console.log(`  ALL IN ROUND ${currentRound}`);
-      for (const m of week) {
-        usedInRound.add(m);
-      }
-      console.log(`  → usedInRound.size=${usedInRound.size}: [${[...usedInRound].sort((a,b)=>a-b).join(',')}]`);
-    }
-  }
-
-  // Save any remaining matchups in current round
-  if (usedInRound.size > 0) {
-    roundMatchups.set(currentRound, usedInRound);
-    console.log(`\nSaving remaining round ${currentRound} with ${usedInRound.size} matchups`);
-  }
-
-  console.log('\n' + '-'.repeat(70));
-  console.log('Final roundMatchups:');
-  for (const [r, s] of roundMatchups) {
-    console.log(`  Round ${r}: [${[...s].sort((a,b)=>a-b).join(',')}] (${s.size} matchups)`);
-  }
-
-  return roundMatchups;
-}
-
-// This is the exact getRoundConstraints from calculate.mjs
+// ============================================================================
+// EXACT COPY of getRoundConstraints from calculate.mjs (lines 353-391)
+// ============================================================================
 function getRoundConstraints(weekStartGame, roundMatchups) {
-  const startRound = Math.floor(weekStartGame / N_MATCHUPS);
+  // Find the current round: the first incomplete round in roundMatchups
+  let startRound = 0;
+  while (roundMatchups.has(startRound) && roundMatchups.get(startRound).size === N_MATCHUPS) {
+    startRound++;
+  }
   const usedInRound = roundMatchups.get(startRound) || new Set();
   const gamesPlayedInRound = usedInRound.size;
   const gamesRemainingInRound = N_MATCHUPS - gamesPlayedInRound;
 
-  console.log('\n' + '='.repeat(70));
-  console.log('getRoundConstraints - what the generator sees for week 3');
-  console.log('='.repeat(70));
-  console.log(`  weekStartGame=${weekStartGame}`);
-  console.log(`  startRound=${startRound}`);
-  console.log(`  usedInRound from roundMatchups.get(${startRound}): [${[...usedInRound].sort((a,b)=>a-b).join(',')}]`);
-  console.log(`  gamesPlayedInRound=${gamesPlayedInRound}`);
-  console.log(`  gamesRemainingInRound=${gamesRemainingInRound}`);
-
   const requiredMatchups = new Set();
-
   if (gamesRemainingInRound <= N_SLOTS && gamesRemainingInRound > 0) {
     for (let m = 0; m < N_MATCHUPS; m++) {
       if (!usedInRound.has(m)) {
         requiredMatchups.add(m);
       }
     }
-    console.log(`  requiredMatchups (gamesRemainingInRound <= N_SLOTS): [${[...requiredMatchups].join(',')}]`);
-  } else {
-    console.log(`  requiredMatchups: (none - gamesRemainingInRound > N_SLOTS)`);
   }
 
   let excludeMatchups = 0;
@@ -131,65 +51,158 @@ function getRoundConstraints(weekStartGame, roundMatchups) {
     for (const m of usedInRound) {
       excludeMatchups |= (1 << m);
     }
-    console.log(`  excludeMatchups: APPLIED (gamesRemainingInRound >= N_SLOTS)`);
-    console.log(`    Excluded indices: [${[...usedInRound].sort((a,b)=>a-b).join(',')}]`);
-    console.log(`    As matchups: ${[...usedInRound].sort((a,b)=>a-b).map(m => formatMatchup(m)).join(' ')}`);
-  } else {
-    console.log(`  excludeMatchups: 0 (gamesRemainingInRound < N_SLOTS, straddling)`);
   }
 
-  return { excludeMatchups, requiredMatchups, gamesRemainingInRound };
+  return { excludeMatchups, requiredMatchups, gamesRemainingInRound, startRound, usedInRound };
 }
 
-// The failing schedule
-const inputPath = [
-  [0,6,12,2,8,26,20,15,22,16,23,14],  // Week 0
-  [21,13,17,18,24,1,9,4,5,10,11,25],  // Week 1
-  [0,1,7,3,9,15,24,19,25,21,27,20],   // Week 2
-];
+// ============================================================================
+// EXACT COPY of updateRoundMatchups from calculate.mjs (lines 394-437)
+// ============================================================================
+function updateRoundMatchups(weekNum, weekMatchups, roundMatchups, requiredMatchups) {
+  const weekStartGame = weekNum * N_SLOTS;
+  const startRound = Math.floor(weekStartGame / N_MATCHUPS);
 
-const week3 = [11,25,9,23,10,22,13,2,17,21,1,6];
+  const newRoundMatchups = new Map();
+  for (const [r, s] of roundMatchups) {
+    newRoundMatchups.set(r, new Set(s));
+  }
 
-console.log('Input path (weeks 0-2):');
-for (let i = 0; i < inputPath.length; i++) {
-  console.log(`  Week ${i}: [${inputPath[i].join(',')}]`);
-  console.log(`          ${inputPath[i].map(m => formatMatchup(m)).join(' ')}`);
+  const usedInStartRound = newRoundMatchups.get(startRound) || new Set();
+  const gamesRemainingInRound = N_MATCHUPS - usedInStartRound.size;
+
+  if (gamesRemainingInRound >= N_SLOTS) {
+    if (!newRoundMatchups.has(startRound)) {
+      newRoundMatchups.set(startRound, new Set());
+    }
+    for (const m of weekMatchups) {
+      newRoundMatchups.get(startRound).add(m);
+    }
+  } else {
+    if (!newRoundMatchups.has(startRound)) {
+      newRoundMatchups.set(startRound, new Set());
+    }
+    if (!newRoundMatchups.has(startRound + 1)) {
+      newRoundMatchups.set(startRound + 1, new Set());
+    }
+    for (const m of weekMatchups) {
+      if (requiredMatchups.has(m)) {
+        newRoundMatchups.get(startRound).add(m);
+      } else {
+        newRoundMatchups.get(startRound + 1).add(m);
+      }
+    }
+  }
+
+  return newRoundMatchups;
 }
-console.log(`\nWeek 3 (the problem): [${week3.join(',')}]`);
-console.log(`          ${week3.map(m => formatMatchup(m)).join(' ')}`);
 
-// Step 1: Rebuild round tracking from weeks 0-2
-const roundMatchups = rebuildRoundMatchups(inputPath);
+// ============================================================================
+// Parse input weeks from command line or use defaults
+// ============================================================================
+const args = process.argv.slice(2);
+let inputPath;
 
-// Step 2: Get constraints for week 3
-const weekStartGame = 3 * N_SLOTS;  // 36
-const { excludeMatchups, requiredMatchups, gamesRemainingInRound } = getRoundConstraints(weekStartGame, roundMatchups);
-
-// Step 3: Check which matchups in week 3 should have been excluded
-console.log('\n' + '='.repeat(70));
-console.log('Analysis: Which week 3 matchups violate constraints?');
-console.log('='.repeat(70));
-
-const round1Matchups = roundMatchups.get(1) || new Set();
-console.log(`\nRound 1 matchups after weeks 0-2: [${[...round1Matchups].sort((a,b)=>a-b).join(',')}]`);
-console.log(`As games: ${[...round1Matchups].sort((a,b)=>a-b).map(m => formatMatchup(m)).join(' ')}`);
-
-console.log(`\nWeek 3 matchups: [${week3.join(',')}]`);
-console.log(`As games: ${week3.map(m => formatMatchup(m)).join(' ')}`);
-
-const violations = week3.filter(m => round1Matchups.has(m));
-console.log(`\nVIOLATIONS (matchups in week 3 that are already in round 1):`);
-console.log(`  [${violations.join(',')}] = ${violations.map(m => formatMatchup(m)).join(' ')}`);
-
-console.log(`\nexcludeMatchups bitmask: ${excludeMatchups}`);
-if (excludeMatchups === 0) {
-  console.log(`  *** BUG: excludeMatchups is 0, so NO matchups are excluded!`);
-  console.log(`  *** This is because gamesRemainingInRound (${gamesRemainingInRound}) >= N_SLOTS (${N_SLOTS}) is ${gamesRemainingInRound >= N_SLOTS}`);
-  console.log(`  *** But wait... 20 >= 12 is TRUE, so excludeMatchups SHOULD be applied!`);
+if (args.length > 0) {
+  inputPath = args.map(arg => arg.split(',').map(n => parseInt(n.trim(), 10)));
 } else {
-  console.log(`  Checking if violations are excluded:`);
-  for (const m of violations) {
-    const isExcluded = (excludeMatchups & (1 << m)) !== 0;
-    console.log(`    m=${m} (${formatMatchup(m)}): excluded=${isExcluded}`);
+  // Default: first valid 3-week path from 8teams-3weeks.txt
+  inputPath = [
+    [0,1,7,2,8,14,19,23,24,25,26,27],   // Week 0
+    [13,16,20,17,21,5,12,3,4,9,10,22],  // Week 1
+    [0,5,11,6,12,16,21,14,15,18,19,22]  // Week 2
+  ];
+}
+
+console.log('═'.repeat(70));
+console.log('TRACE: Simulating calculate.mjs constraint tracking');
+console.log('═'.repeat(70));
+console.log(`\nInput: ${inputPath.length} weeks, tracing constraints for week ${inputPath.length}`);
+
+// Step through weeks, showing how roundMatchups evolves
+let roundMatchups = new Map();
+
+for (let weekNum = 0; weekNum < inputPath.length; weekNum++) {
+  const week = inputPath[weekNum];
+  const weekStartGame = weekNum * N_SLOTS;
+  
+  console.log(`\n${'─'.repeat(70)}`);
+  console.log(`Week ${weekNum}: [${week.join(',')}]`);
+  console.log(`         ${week.map(m => formatMatchup(m)).join(' ')}`);
+  
+  // Get constraints BEFORE this week (what the generator sees)
+  const { excludeMatchups, requiredMatchups, gamesRemainingInRound, startRound, usedInRound } = 
+    getRoundConstraints(weekStartGame, roundMatchups);
+  
+  console.log(`\n  Constraints for this week:`);
+  console.log(`    startRound=${startRound}, usedInRound.size=${usedInRound.size}, remaining=${gamesRemainingInRound}`);
+  
+  if (requiredMatchups.size > 0) {
+    console.log(`    requiredMatchups: [${[...requiredMatchups].join(',')}]`);
+  }
+  
+  const excludedBits = [];
+  for (let m = 0; m < N_MATCHUPS; m++) {
+    if (excludeMatchups & (1 << m)) excludedBits.push(m);
+  }
+  if (excludedBits.length > 0) {
+    console.log(`    excludeMatchups: [${excludedBits.join(',')}] (${excludedBits.length} excluded)`);
+  } else {
+    console.log(`    excludeMatchups: (none - week straddles or starts fresh round)`);
+  }
+  
+  // Update round tracking AFTER this week
+  roundMatchups = updateRoundMatchups(weekNum, week, roundMatchups, requiredMatchups);
+  
+  console.log(`\n  After week ${weekNum}:`);
+  for (const [r, s] of [...roundMatchups.entries()].sort((a,b) => a[0] - b[0])) {
+    const status = s.size === N_MATCHUPS ? '✓ COMPLETE' : `${s.size}/${N_MATCHUPS}`;
+    console.log(`    Round ${r}: ${status}`);
+  }
+}
+
+// Now show what constraints would be computed for the NEXT week
+const nextWeekNum = inputPath.length;
+const nextWeekStartGame = nextWeekNum * N_SLOTS;
+
+console.log(`\n${'═'.repeat(70)}`);
+console.log(`CONSTRAINTS FOR WEEK ${nextWeekNum} (what the generator will use)`);
+console.log('═'.repeat(70));
+
+const { excludeMatchups, requiredMatchups, gamesRemainingInRound, startRound, usedInRound } = 
+  getRoundConstraints(nextWeekStartGame, roundMatchups);
+
+console.log(`\nweekStartGame=${nextWeekStartGame}`);
+console.log(`startRound=${startRound} (first incomplete round)`);
+console.log(`usedInRound.size=${usedInRound.size}`);
+console.log(`gamesRemainingInRound=${gamesRemainingInRound}`);
+
+if (usedInRound.size > 0) {
+  console.log(`\nMatchups already in round ${startRound}:`);
+  console.log(`  [${[...usedInRound].sort((a,b)=>a-b).join(',')}]`);
+  console.log(`  ${[...usedInRound].sort((a,b)=>a-b).map(m => formatMatchup(m)).join(' ')}`);
+}
+
+if (requiredMatchups.size > 0) {
+  console.log(`\nREQUIRED matchups (must appear in week ${nextWeekNum}):`);
+  console.log(`  [${[...requiredMatchups].join(',')}]`);
+  console.log(`  ${[...requiredMatchups].map(m => formatMatchup(m)).join(' ')}`);
+} else {
+  console.log(`\nNo required matchups (gamesRemainingInRound=${gamesRemainingInRound} > N_SLOTS=${N_SLOTS})`);
+}
+
+const excludedBits = [];
+for (let m = 0; m < N_MATCHUPS; m++) {
+  if (excludeMatchups & (1 << m)) excludedBits.push(m);
+}
+
+if (excludedBits.length > 0) {
+  console.log(`\nEXCLUDED matchups (cannot appear in week ${nextWeekNum}):`);
+  console.log(`  [${excludedBits.join(',')}]`);
+  console.log(`  ${excludedBits.map(m => formatMatchup(m)).join(' ')}`);
+} else {
+  console.log(`\nNo excluded matchups`);
+  if (gamesRemainingInRound < N_SLOTS) {
+    console.log(`  (gamesRemainingInRound=${gamesRemainingInRound} < N_SLOTS=${N_SLOTS}, week will straddle)`);
   }
 }
