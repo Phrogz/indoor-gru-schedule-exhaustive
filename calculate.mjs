@@ -584,7 +584,7 @@ if (!isMainThread) {
   // NOTE: When a week straddles rounds, we must process ALL required matchups
   // first (to complete the current round), then ALL extras (to start the new round).
   // We cannot process in slot order because extras may appear before required matchups.
-  function rebuildRoundMatchups(path) {
+  function rebuildRoundMatchups(path, debug = false) {
     const roundMatchups = new Map();
     let currentRound = 0;
     let usedInRound = new Set();
@@ -592,6 +592,13 @@ if (!isMainThread) {
     for (let weekNum = 0; weekNum < path.length; weekNum++) {
       const week = path[weekNum];
       const gamesRemainingInRound = nMatchups - usedInRound.size;
+
+      if (debug) {
+        parentPort.postMessage({
+          type: 'debug',
+          message: `rebuildRoundMatchups week ${weekNum}: gamesRemaining=${gamesRemainingInRound}, usedInRound.size=${usedInRound.size}, week.length=${week.length}`
+        });
+      }
 
       if (gamesRemainingInRound <= nSlots) {
         // This week straddles rounds - process required first, then extras
@@ -620,12 +627,26 @@ if (!isMainThread) {
             usedInRound.add(m);
           }
         }
+
+        if (debug) {
+          parentPort.postMessage({
+            type: 'debug',
+            message: `  After straddle: currentRound=${currentRound}, usedInRound.size=${usedInRound.size}`
+          });
+        }
       } else {
         // All matchups go to current round
         for (const m of week) {
           usedInRound.add(m);
         }
       }
+    }
+
+    if (debug) {
+      parentPort.postMessage({
+        type: 'debug',
+        message: `rebuildRoundMatchups final: currentRound=${currentRound}, usedInRound.size=${usedInRound.size}`
+      });
     }
 
     // Save any remaining matchups in current round
@@ -745,8 +766,8 @@ if (!isMainThread) {
         message: `Received work: pathIndex=${pathIndex}, path length=${inputPath.length} weeks, nMatchups=${nMatchups}, nSlots=${nSlots}`
       });
 
-      // Debug: trace round state computation
-      const debugRoundMatchups = rebuildRoundMatchups(inputPath);
+      // Debug: trace round state computation (enable verbose for first path only)
+      const debugRoundMatchups = rebuildRoundMatchups(inputPath, pathIndex === 0);
       const debugGameOffset = startWeek * nSlots;
       const debugStartRound = Math.floor(debugGameOffset / nMatchups);
       const debugUsedInRound = debugRoundMatchups.get(debugStartRound) || new Set();
