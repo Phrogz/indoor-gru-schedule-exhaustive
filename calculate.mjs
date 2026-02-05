@@ -370,7 +370,7 @@ const CONTINUATION_MULTIPLIERS = {
   },
   8: {
     2: 32,       // Week 2 continuations per week 1
-    3: 32,       // Week 3 continuations per week 2
+    3: 125,      // Week 3 continuations per week 2 (measured: 5.75M unique / 46K paths)
     4: 81944.69, // Week 4 continuations per week 3
     5: 22.73,    // Week 5 continuations per week 4
     6: 201600,   // Week 6 continuations per week 5
@@ -1289,17 +1289,19 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
   const existingPathHashes = new Set();  // For deduplication during resume - use hashes instead of full keys
   const saveFile = `results/${N_TEAMS}teams-${N_WEEKS}week${N_WEEKS > 1 ? 's' : ''}.txt`;
 
-  // Hash a path to a compact number for deduplication (collision-tolerant since it's for filtering)
+  // Hash a path to BigInt for deduplication (64-bit to minimize collisions at scale)
+  // With 5M+ items, 32-bit hash has ~4000 expected collisions; 64-bit has ~1e-6
   function hashPath(path) {
-    let hash = 0;
+    let h1 = 0n, h2 = 0n;
     for (let w = 0; w < path.length; w++) {
       const week = path[w];
       for (let i = 0; i < week.length; i++) {
-        hash = ((hash << 5) - hash + week[i]) | 0;
-        hash = ((hash << 13) ^ hash) | 0;
+        const v = BigInt(week[i]);
+        h1 = ((h1 << 5n) - h1 + v) & 0xFFFFFFFFn;
+        h2 = ((h2 << 7n) + h2 + v) & 0xFFFFFFFFn;
       }
     }
-    return hash;
+    return (h1 << 32n) | h2;
   }
 
   // Helper: compare two schedule arrays element-by-element
@@ -1533,11 +1535,31 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
         }
       } else if (modIterator) {
         // Multi-level mod iteration for diverse coverage
-        for (let step = 0; step < totalInputPaths; step++) {
+        // NOTE: Non-uniform child counts can cause duplicate path generation;
+        // we deduplicate here to avoid wasting worker computation
+        const dispatchedPathKeys = new Set();
+        let uniqueIndex = 0;  // Sequential index for unique paths only
+        let duplicatesSkipped = 0;
+        const originalTotal = totalInputPaths;
+        for (let step = 0; step < originalTotal; step++) {
           const result = modIterator.getPathAtStep(step);
           if (result && result.path) {
-            yield result;
+            const pathKey = result.path.map(s => s.join(',')).join('|');
+            if (!dispatchedPathKeys.has(pathKey)) {
+              dispatchedPathKeys.add(pathKey);
+              // Use sequential index for unique paths (not step, which has gaps)
+              yield { index: uniqueIndex++, path: result.path };
+            } else {
+              duplicatesSkipped++;
+            }
           }
+        }
+        if (duplicatesSkipped > 0) {
+          console.log(`  (Mod iterator: ${duplicatesSkipped.toLocaleString()} redundant paths skipped, ${uniqueIndex.toLocaleString()} unique dispatched)`);
+          // Shrink tracking arrays to match actual unique count (avoids false incomplete detection)
+          totalInputPaths = uniqueIndex;
+          foundCounts.length = uniqueIndex;
+          isComplete.length = uniqueIndex;
         }
       } else {
         // Fallback: sequential file order
@@ -1724,11 +1746,24 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
             }
           } else if (msg.type === 'optimal') {
             // Worker found optimal paths - write them
+            // Skip if shutting down (workers terminated, messages may be corrupted)
+            if (shuttingDown) return;
+            
             const week0 = msg.week0;
             const pathsToWrite = [];
 
             for (const laterWeeks of msg.continuations) {
               const fullPath = [week0, ...laterWeeks];
+              
+              // Validate path structure (guards against corrupted messages during shutdown)
+              let valid = true;
+              for (const week of fullPath) {
+                if (!Array.isArray(week) || week.length !== N_SLOTS || week.some(v => !Number.isFinite(v))) {
+                  valid = false;
+                  break;
+                }
+              }
+              if (!valid) continue;
 
               // Always deduplicate - async race conditions can cause duplicates
               const pathHash = hashPath(fullPath);

@@ -57,6 +57,12 @@ function validateWeek(schedule, nTeams, nSlots, weekNum, pathNum) {
     errors.push(`Week ${weekNum}: Expected ${nSlots} slots, got ${schedule.length}`);
     return errors;
   }
+  
+  // Check for NaN or non-finite values
+  if (schedule.some(v => !Number.isFinite(v))) {
+    errors.push(`Week ${weekNum}: Schedule contains invalid values (NaN or non-finite)`);
+    return errors;
+  }
 
   // Check for duplicate matchups in same week
   const usedMatchups = new Set();
@@ -106,9 +112,15 @@ function validateWeek(schedule, nTeams, nSlots, weekNum, pathNum) {
 // Score a week
 function scoreWeek(schedule, nTeams) {
   const teamSlots = Array.from({ length: nTeams }, () => []);
+  const nMatchups = (nTeams * (nTeams - 1)) / 2;
 
   for (let s = 0; s < schedule.length; s++) {
-    const [t1, t2] = decodeMatchup(schedule[s], nTeams);
+    const m = schedule[s];
+    // Skip invalid matchups (NaN, out of range)
+    if (!Number.isFinite(m) || m < 0 || m >= nMatchups) {
+      return { doubleByes: -1, fiveSlotTeams: -1 };  // Invalid score
+    }
+    const [t1, t2] = decodeMatchup(m, nTeams);
     teamSlots[t1].push(s);
     teamSlots[t2].push(s);
   }
@@ -151,6 +163,15 @@ function validateRoundRobin(weeks, nTeams) {
   const errors = [];
   const nMatchups = (nTeams * (nTeams - 1)) / 2;
   const nSlots = (nTeams * 3) / 2;
+
+  // Check for invalid values in any week first
+  for (let weekNum = 0; weekNum < weeks.length; weekNum++) {
+    const week = weeks[weekNum];
+    if (week.some(m => !Number.isFinite(m) || m < 0 || m >= nMatchups)) {
+      errors.push(`Week ${weekNum}: Contains invalid matchup values`);
+      return errors;  // Can't validate round-robin with invalid data
+    }
+  }
 
   // Track matchups used in current round
   let currentRound = 0;
@@ -247,12 +268,12 @@ async function validate() {
   const enableDuplicateDetection = header.count <= 10_000_000;
   
   // Use hash-based duplicate detection for medium files (avoids Set size limits)
-  // Note: Hash collisions could cause false duplicate reports, but probability is very low
+  // Uses 64-bit BigInt hash to minimize collision probability
   function hashPath(pathKey) {
-    let hash = 5381;
+    let hash = 5381n;
     for (let i = 0; i < pathKey.length; i++) {
-      hash = ((hash << 5) + hash) + pathKey.charCodeAt(i);
-      hash = hash | 0; // Convert to 32-bit signed integer
+      hash = ((hash << 5n) + hash) + BigInt(pathKey.charCodeAt(i));
+      hash = hash & 0xFFFFFFFFFFFFFFFFn; // Keep 64 bits
     }
     return hash;
   }
@@ -278,11 +299,16 @@ async function validate() {
       console.error(`Path ${pathCount}, Week ${depth}:`, weekErrors);
     }
 
-    // Check week score
-    const weekScore = scoreWeek(schedule, nTeams);
-    const hasScoreError = weekScore.doubleByes !== expectedPerWeekScore[0] || weekScore.fiveSlotTeams !== expectedPerWeekScore[1];
-    if (hasScoreError && !fixMode && scoreErrors < 10) {
-      console.error(`Path ${pathCount}, Week ${depth}: Score [${weekScore.doubleByes},${weekScore.fiveSlotTeams}] != expected [${expectedPerWeekScore}]`);
+    // Check week score (skip if week already has validation errors)
+    let hasScoreError = false;
+    if (weekErrors.length === 0) {
+      const weekScore = scoreWeek(schedule, nTeams);
+      hasScoreError = weekScore.doubleByes !== expectedPerWeekScore[0] || weekScore.fiveSlotTeams !== expectedPerWeekScore[1];
+      if (hasScoreError && !fixMode && scoreErrors < 10) {
+        console.error(`Path ${pathCount}, Week ${depth}: Score [${weekScore.doubleByes},${weekScore.fiveSlotTeams}] != expected [${expectedPerWeekScore}]`);
+      }
+    } else {
+      hasScoreError = true;  // Treat validation errors as score errors for counting
     }
 
     // If complete path, validate round-robin and check for duplicates

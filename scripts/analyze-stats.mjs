@@ -102,11 +102,17 @@ function calculateStats(numbers) {
 
 /**
  * Print analysis for a given file
- * @param {number} fileWeeks - Number of weeks in the filename (e.g., 2 for 8teams-2weeks.txt)
- * @param {string} [note] - Optional note to display after filename
+ * @param {string} filepath - Path to the results file
+ * @param {number} [weeksOverride] - Override weeks from filename parsing
  */
-async function analyzeFile(fileWeeks, note = '') {
-	const filepath = `results/${N_TEAMS}teams-${fileWeeks}weeks.txt`;
+async function analyzeFile(filepath, weeksOverride = null) {
+	// Parse weeks from filename if not overridden
+	const match = filepath.match(/(\d+)teams-(\d+)weeks?/);
+	if (!match && !weeksOverride) {
+		console.error(`Cannot determine weeks from filename: ${filepath}`);
+		return;
+	}
+	const fileWeeks = weeksOverride ?? parseInt(match[2], 10);
 	const parentDepth = fileWeeks - 2;  // 0-indexed depth of parent nodes
 
 	// User-facing week numbers (1-indexed)
@@ -114,7 +120,7 @@ async function analyzeFile(fileWeeks, note = '') {
 	const childWeek = fileWeeks;
 
 	console.log('='.repeat(70));
-	console.log(`${N_TEAMS}teams-${fileWeeks}weeks.txt${note}`);
+	console.log(filepath);
 	console.log('='.repeat(70));
 
 	const counts = await countChildrenAtDepth(filepath, parentDepth);
@@ -126,8 +132,6 @@ async function analyzeFile(fileWeeks, note = '') {
 		const total = counts.reduce((a, b) => a + b, 0);
 		console.log(`Week ${childWeek} continuations per week ${parentWeek}: min=${stats.min.toLocaleString()}, median=${stats.median.toLocaleString()}, max=${stats.max.toLocaleString()}, average=${stats.average.toFixed(2)}`);
 		console.log(`Total week ${childWeek} schedules: ${total.toLocaleString()}`);
-		// console.log(`\nArray of week ${childWeek} counts for each week ${parentWeek} option:`);
-		// console.log(JSON.stringify(counts));
 	} else {
 		console.log(`No week ${parentWeek} options found in file.`);
 	}
@@ -136,24 +140,29 @@ async function analyzeFile(fileWeeks, note = '') {
 // Main execution
 const args = process.argv.slice(2);
 const analysisType = args[0] || 'all';
-const maxWeeks = findMaxWeeks();
 
-if (maxWeeks < 2) {
-	console.log(`No result files found for ${N_TEAMS} teams with 2+ weeks.`);
-	process.exit(1);
-}
-
-if (analysisType === 'all') {
-	for (let weeks = 2; weeks <= maxWeeks; weeks++) {
-		if (weeks > 2) console.log('\n');
-		const note = weeks === 3 ? ' (partial file)' : '';
-		await analyzeFile(weeks, note);
-	}
+// Check if argument is a file path
+if (analysisType.includes('/') || analysisType.endsWith('.txt')) {
+	await analyzeFile(analysisType);
 } else {
-	const weeks = parseInt(analysisType.replace('weeks', ''), 10);
-	if (weeks >= 2 && weeks <= maxWeeks) {
-		await analyzeFile(weeks);
+	const maxWeeks = findMaxWeeks();
+	
+	if (maxWeeks < 2) {
+		console.log(`No result files found for ${N_TEAMS} teams with 2+ weeks.`);
+		process.exit(1);
+	}
+	
+	if (analysisType === 'all') {
+		for (let weeks = 2; weeks <= maxWeeks; weeks++) {
+			if (weeks > 2) console.log('\n');
+			await analyzeFile(`results/${N_TEAMS}teams-${weeks}weeks.txt`);
+		}
 	} else {
-		console.log(`Usage: node analyze_stats.mjs [all|2weeks|3weeks|...|${maxWeeks}weeks]`);
+		const weeks = parseInt(analysisType.replace('weeks', ''), 10);
+		if (weeks >= 2 && weeks <= maxWeeks) {
+			await analyzeFile(`results/${N_TEAMS}teams-${weeks}weeks.txt`);
+		} else {
+			console.log(`Usage: node analyze_stats.mjs [all|2weeks|3weeks|...|${maxWeeks}weeks|<filepath>]`);
+		}
 	}
 }
