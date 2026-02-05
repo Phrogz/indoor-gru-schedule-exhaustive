@@ -4,10 +4,272 @@
 import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
 import { cpus } from 'os';
 import { fileURLToPath } from 'url';
-import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync, openSync, readSync, closeSync } from 'fs';
 import { createReadStream } from 'fs';
 import { createInterface } from 'readline';
 import { TreeWriter, TreeReader, parseHeader, readHeaderFromFile } from './lib/tree-format.mjs';
+
+// ============================================================================
+// Multi-Level Mod Iterator: Diverse path iteration across tree structure
+// ============================================================================
+// Instead of depth-first file order, iterate paths using modular arithmetic
+// at each tree level to maximize diversity across all dimensions.
+//
+// For step i:
+//   w1_idx = i % count_W1_nodes
+//   w2_idx = i % children_count(w1_node)
+//   w3_idx = i % children_count(w2_node)
+//   ...
+//
+// This ensures early iterations cover diverse branches at ALL tree levels.
+// ============================================================================
+
+/**
+ * Build a tree index from a results file for multi-level mod iteration.
+ * 
+ * Structure: For each internal node, store:
+ *   - schedule: the matchup array for this week
+ *   - childCount: number of children (next level nodes or leaves)
+ *   - firstChildIdx: index of first child in the next level's array (for internal children)
+ *   - firstLeafIdx: global leaf index of first leaf child (for leaf parents)
+ * 
+ * Also stores leafOffsets: Float64Array of byte offsets for ALL leaves (O(1) access)
+ * 
+ * @param {string} filePath - Path to tree-format results file
+ * @returns {Promise<{header, nodesByDepth, leafOffsets, totalPaths}>}
+ */
+async function buildTreeIndex(filePath) {
+  console.log('  Building tree index for diverse iteration...');
+  const startTime = performance.now();
+  
+  const rl = createInterface({
+    input: createReadStream(filePath),
+    crlfDelay: Infinity
+  });
+
+  let header = null;
+  let totalPaths = 0;
+  let currentByteOffset = 0;
+  
+  // nodesByDepth[d] = [{schedule, childCount, firstChildIdx, firstLeafIdx}, ...]
+  const nodesByDepth = [];
+  
+  // Store byte offsets for ALL leaves - enables O(1) access
+  // Using regular array first (will convert to Float64Array after knowing size)
+  const leafOffsetsList = [];
+  
+  // Stack: [{depth, nodeIndex}] - tracks current position in tree
+  const stack = [];
+  
+  let lineCount = 0;
+  let lastProgressTime = startTime;
+
+  for await (const line of rl) {
+    const lineBytes = Buffer.byteLength(line, 'utf8') + 1;
+    lineCount++;
+    
+    const now = performance.now();
+    if (now - lastProgressTime > 2000) {
+      const memUsed = (leafOffsetsList.length * 8 / 1024 / 1024).toFixed(0);
+      process.stdout.write(`\r    ${lineCount.toLocaleString()} lines, ${leafOffsetsList.length.toLocaleString()} leaves (~${memUsed} MB)...   `);
+      lastProgressTime = now;
+    }
+    
+    if (line.startsWith('#')) {
+      header = parseHeader(line);
+      for (let d = 0; d < header.weeks - 1; d++) {
+        nodesByDepth.push([]);
+      }
+      currentByteOffset += lineBytes;
+      continue;
+    }
+    
+    if (line.trim() === '' || line.trim() === '…') {
+      currentByteOffset += lineBytes;
+      continue;
+    }
+    
+    let depth = 0;
+    while (line[depth] === '\t') depth++;
+    
+    const content = line.slice(depth);
+    const schedule = content.split(',').map(n => parseInt(n.trim(), 10));
+    
+    // Pop stack to current depth
+    while (stack.length > depth) {
+      stack.pop();
+    }
+    
+    const isLeaf = depth === header.weeks - 1;
+    
+    if (isLeaf) {
+      // Record leaf byte offset for O(1) access later
+      const globalLeafIdx = leafOffsetsList.length;
+      leafOffsetsList.push(currentByteOffset);
+      totalPaths++;
+      
+      // Update leaf parent's child count and firstLeafIdx
+      if (stack.length > 0) {
+        const parent = stack[stack.length - 1];
+        const parentNode = nodesByDepth[parent.depth][parent.nodeIndex];
+        parentNode.childCount++;
+        if (parentNode.firstLeafIdx === -1) {
+          parentNode.firstLeafIdx = globalLeafIdx;
+        }
+      }
+    } else {
+      const nodeIndex = nodesByDepth[depth].length;
+      const node = {
+        schedule,
+        childCount: 0,
+        firstChildIdx: -1,  // For internal node children
+        firstLeafIdx: -1    // For leaf children (only leaf parents use this)
+      };
+      nodesByDepth[depth].push(node);
+      
+      // Link from parent
+      if (stack.length > 0) {
+        const parent = stack[stack.length - 1];
+        const parentNode = nodesByDepth[parent.depth][parent.nodeIndex];
+        parentNode.childCount++;
+        if (parentNode.firstChildIdx === -1) {
+          parentNode.firstChildIdx = nodeIndex;
+        }
+      }
+      
+      stack.push({ depth, nodeIndex });
+    }
+    
+    currentByteOffset += lineBytes;
+  }
+  
+  // Convert to typed array for memory efficiency
+  const leafOffsets = new Float64Array(leafOffsetsList);
+  
+  const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+  const totalNodes = nodesByDepth.reduce((sum, level) => sum + level.length, 0);
+  const leafMemMB = (leafOffsets.byteLength / 1024 / 1024).toFixed(1);
+  const nodeMemMB = (totalNodes * 50 / 1024 / 1024).toFixed(1);
+  
+  process.stdout.write(`\r    Indexed ${totalNodes.toLocaleString()} nodes + ${totalPaths.toLocaleString()} leaves in ${elapsed}s (${leafMemMB} MB offsets + ~${nodeMemMB} MB nodes)   \n`);
+  
+  // Log tree shape
+  for (let d = 0; d < nodesByDepth.length; d++) {
+    const nodes = nodesByDepth[d];
+    const childCounts = nodes.map(n => n.childCount);
+    const avgChildren = childCounts.length > 0 
+      ? (childCounts.reduce((a, b) => a + b, 0) / childCounts.length).toFixed(1)
+      : 0;
+    console.log(`    Depth ${d} (Week ${d + 1}): ${nodes.length.toLocaleString()} nodes, avg ${avgChildren} children`);
+  }
+  
+  return { header, nodesByDepth, leafOffsets, totalPaths };
+}
+
+/**
+ * Multi-level mod iterator: yields paths in diverse order.
+ * Uses precomputed leaf byte offsets for O(1) leaf access.
+ */
+class MultiLevelModIterator {
+  #filePath;
+  #nodesByDepth;
+  #leafOffsets;  // Float64Array of all leaf byte offsets
+  #totalPaths;
+  #weeks;
+  #fd = null;
+  #buffer = null;
+  
+  constructor(filePath, treeIndex) {
+    this.#filePath = filePath;
+    this.#nodesByDepth = treeIndex.nodesByDepth;
+    this.#leafOffsets = treeIndex.leafOffsets;
+    this.#totalPaths = treeIndex.totalPaths;
+    this.#weeks = treeIndex.header.weeks;
+    this.#buffer = Buffer.alloc(256);  // Enough for one schedule line
+  }
+  
+  get totalPaths() {
+    return this.#totalPaths;
+  }
+  
+  open() {
+    if (!this.#fd) {
+      this.#fd = openSync(this.#filePath, 'r');
+    }
+  }
+  
+  close() {
+    if (this.#fd) {
+      closeSync(this.#fd);
+      this.#fd = null;
+    }
+  }
+  
+  /**
+   * Get path at step using multi-level mod arithmetic.
+   * Each level uses: childIdx = step % childCount
+   */
+  getPathAtStep(step) {
+    const path = [];
+    
+    // Navigate through internal nodes
+    for (let depth = 0; depth < this.#weeks - 1; depth++) {
+      const nodesAtDepth = this.#nodesByDepth[depth];
+      
+      if (depth === 0) {
+        // Root level: index directly into all nodes
+        const nodeIdx = step % nodesAtDepth.length;
+        path.push({ node: nodesAtDepth[nodeIdx], idx: nodeIdx });
+      } else {
+        // Child level: use parent's firstChildIdx + offset
+        const parent = path[depth - 1].node;
+        if (parent.childCount === 0) {
+          console.error(`Parent at depth ${depth - 1} has no children`);
+          return null;
+        }
+        const childOffset = step % parent.childCount;
+        const nodeIdx = parent.firstChildIdx + childOffset;
+        path.push({ node: nodesAtDepth[nodeIdx], idx: nodeIdx });
+      }
+    }
+    
+    // Get leaf using O(1) offset lookup
+    const leafParent = path[this.#weeks - 2].node;
+    const leafChildIdx = step % leafParent.childCount;
+    const globalLeafIdx = leafParent.firstLeafIdx + leafChildIdx;
+    
+    // Direct O(1) access to leaf byte offset
+    const leafByteOffset = this.#leafOffsets[globalLeafIdx];
+    const leafSchedule = this.#readLeafAt(leafByteOffset);
+    
+    // Build final path as array of schedules
+    const result = path.map(p => p.node.schedule);
+    result.push(leafSchedule);
+    
+    return { index: step, path: result };
+  }
+  
+  /**
+   * Read a single leaf schedule at a known byte offset - O(1) operation
+   */
+  #readLeafAt(byteOffset) {
+    if (!this.#fd) this.open();
+    
+    const bytesRead = readSync(this.#fd, this.#buffer, 0, this.#buffer.length, byteOffset);
+    if (bytesRead === 0) return null;
+    
+    // Find line end
+    let lineEnd = 0;
+    while (lineEnd < bytesRead && this.#buffer[lineEnd] !== 10) lineEnd++;
+    
+    // Skip leading tabs
+    let start = 0;
+    while (start < lineEnd && this.#buffer[start] === 9) start++;
+    
+    const content = this.#buffer.toString('utf8', start, lineEnd);
+    return content.split(',').map(n => parseInt(n.trim(), 10));
+  }
+}
 
 // Parse command-line args (only used in main thread)
 function parseArgs() {
@@ -195,6 +457,7 @@ function enumerateSchedules(options) {
   const validMasks = new Array(N_TEAMS).fill(0n);
   let usedMatchups = 0;
   let count = 0;
+  let stopped = false;  // Early termination flag
 
   // NOTE: excludeMatchups applies uniformly to all slots in the week.
   // When a week straddles rounds, games from different rounds can be
@@ -214,13 +477,18 @@ function enumerateSchedules(options) {
   }
 
   function backtrack(slot) {
+    if (stopped) return;  // Early exit if callback requested stop
+    
     if (slot === N_SLOTS) {
       // Verify all required matchups were placed
       for (let ti = 0; ti < N_TEAMS; ti++) {
         if (requiredOpponents[ti].size > 0) return;  // Required matchup missing
       }
       count++;
-      if (onSchedule) onSchedule(games);
+      // onSchedule returns false to stop enumeration
+      if (onSchedule && onSchedule(games) === false) {
+        stopped = true;
+      }
       return;
     }
 
@@ -234,9 +502,9 @@ function enumerateSchedules(options) {
 
     if (candidates.length < 2) return;
 
-    for (let i = 0; i < candidates.length - 1; i++) {
+    for (let i = 0; i < candidates.length - 1 && !stopped; i++) {
       const ti1 = candidates[i];
-      for (let j = i + 1; j < candidates.length; j++) {
+      for (let j = i + 1; j < candidates.length && !stopped; j++) {
         const ti2 = candidates[j];
         const matchup = encodeMatchup(ti1, ti2);
         const matchupBit = 1 << matchup;
@@ -310,7 +578,9 @@ function enumerateSchedules(options) {
     }
 
     for (const pa of patternsWithSlot0) {
+      if (stopped) break;
       for (const pb of patternsWithSlot0) {
+        if (stopped) break;
         const slotsA = new Set(PATTERNS[pa]);
         const slotsB = new Set(PATTERNS[pb]);
         let shared = 0;
@@ -618,6 +888,7 @@ if (!isMainThread) {
 
   // State for processing a single work unit
   let optimalCount = 0;
+  let schedulesChecked = 0;  // Track total continuations checked
   let skipOffset = 0;
   let breadthLimit = 0;
   let breadthReached = false;
@@ -667,17 +938,43 @@ if (!isMainThread) {
     const gameOffset = weekNum * nSlots;
     const { excludeMatchups, requiredMatchups } = getRoundConstraints(gameOffset, roundMatchups);
 
-    // OPTIMIZATION: Use precomputed optimal schedules instead of full enumeration
-    // This is the key speedup: O(thousands) filter vs O(millions) backtracking
-    const validSchedules = getValidOptimalWeeks(excludeMatchups, requiredMatchups);
+    if (breadthLimit > 0) {
+      // BREADTH-LIMITED: Enumerate on-demand with early termination
+      // Don't cache since we may stop early with partial results
+      enumerateSchedules({
+        excludeMatchups,
+        requiredMatchups,
+        onSchedule: (sched) => {
+          if (breadthReached) return false;  // Stop enumeration
+          
+          schedulesChecked++;  // Count every schedule considered
+          
+          const score = scoreSchedule(sched);
+          if (score.doubleByes !== OPTIMAL_WEEK_SCORE[0] || score.fiveSlotTeams !== OPTIMAL_WEEK_SCORE[1]) {
+            return;  // Not optimal (discarded), continue enumeration
+          }
+          
+          const weekMatchups = Array.from(sched);
+          const newRoundMatchups = updateRoundMatchups(weekNum, weekMatchups, roundMatchups, requiredMatchups);
+          const newWeeks = weeks.concat([new Uint8Array(sched)]);
+          enumerateFromPath(week0, weekNum + 1, newRoundMatchups, newWeeks);
+          
+          return breadthReached ? false : undefined;  // Stop if we hit breadth limit
+        }
+      });
+    } else {
+      // EXHAUSTIVE: Use cached results for speed
+      const validSchedules = getValidOptimalWeeks(excludeMatchups, requiredMatchups);
+      schedulesChecked += validSchedules.length;
 
-    for (const sched of validSchedules) {
-      if (breadthReached) return;
+      for (const sched of validSchedules) {
+        if (breadthReached) return;
 
-      const weekMatchups = Array.from(sched);
-      const newRoundMatchups = updateRoundMatchups(weekNum, weekMatchups, roundMatchups, requiredMatchups);
-      const newWeeks = weeks.concat([new Uint8Array(sched)]);
-      enumerateFromPath(week0, weekNum + 1, newRoundMatchups, newWeeks);
+        const weekMatchups = Array.from(sched);
+        const newRoundMatchups = updateRoundMatchups(weekNum, weekMatchups, roundMatchups, requiredMatchups);
+        const newWeeks = weeks.concat([new Uint8Array(sched)]);
+        enumerateFromPath(week0, weekNum + 1, newRoundMatchups, newWeeks);
+      }
     }
   }
 
@@ -685,6 +982,7 @@ if (!isMainThread) {
   function processWorkUnit(inputPath, skip, breadth) {
     // Reset state for this work unit
     optimalCount = 0;
+    schedulesChecked = 0;  // Reset counter for this work unit
     skipOffset = skip;
     breadthLimit = breadth;
     breadthReached = false;
@@ -711,6 +1009,7 @@ if (!isMainThread) {
     return {
       totalFound: optimalCount,  // Total optimal paths found (including skipped)
       newResults: newResultsFound,  // New results found this round
+      schedulesChecked,  // Total continuations checked
       isComplete
     };
   }
@@ -726,6 +1025,7 @@ if (!isMainThread) {
         pathIndex,
         totalFound: result.totalFound,
         newResults: result.newResults,
+        schedulesChecked: result.schedulesChecked,
         isComplete: result.isComplete
       });
     } else if (msg.type === 'done') {
@@ -1113,7 +1413,8 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     let totalInputPaths = 0;
 
     if (resumeData && priorFile && existsSync(priorFile)) {
-      // Resume mode: copy existing results and use startingPaths
+      // Resume mode: copy existing results, then load ALL source paths
+      // (filtering out completed ones, marking incomplete ones for resume)
       console.log(`Copying existing complete paths from ${priorFile}...`);
       const reader = new TreeReader(priorFile);
       let existingCount = 0;
@@ -1133,14 +1434,52 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
         writePathBatch(batchPaths);
       }
       console.log(`  Copied ${existingCount} existing paths`);
-      inMemoryPaths = startingPaths || [];
+
+      // Build sets for quick lookup
+      const completedKeys = new Set(resumeData.completedKeys || []);
+      const incompleteKeys = new Set(resumeData.incompleteKeys || []);
+
+      // Load ALL source paths, filtering and marking appropriately
+      console.log(`  Loading source paths from ${resumeData.sourceFile}...`);
+      const sourceReader = new TreeReader(resumeData.sourceFile);
+      
+      inMemoryPaths = [];
+      let skippedComplete = 0;
+      let resumeIncomplete = 0;
+      let addedUnprocessed = 0;
+      
+      for await (const path of sourceReader.paths()) {
+        // Build key in same format as findIncompleteBranches uses
+        const key = path.map(s => s.join(',')).join('|');
+        
+        if (completedKeys.has(key)) {
+          // This path was fully explored - skip it
+          skippedComplete++;
+          continue;
+        }
+        
+        if (incompleteKeys.has(key)) {
+          // This path was partially explored - add it (will resume with skip offset)
+          resumeIncomplete++;
+        } else {
+          // This path was never started - add it fresh
+          addedUnprocessed++;
+        }
+        
+        inMemoryPaths.push(path);
+      }
+      
+      console.log(`  Source: ${skippedComplete} complete (skip), ${resumeIncomplete} incomplete (resume), ${addedUnprocessed} unprocessed (new)`);
       totalInputPaths = inMemoryPaths.length;
     } else if (priorFile && existsSync(priorFile) && !VALIDATE) {
-      // Stream from prior results file (don't load into memory)
-      const header = await readHeaderFromFile(priorFile);
+      // Build tree index for diverse iteration (multi-level mod)
       sourceFile = priorFile;
-      totalInputPaths = header.count;
-      console.log(`  Streaming from ${priorFile} (${totalInputPaths} paths)`);
+      const treeIndex = await buildTreeIndex(priorFile);
+      totalInputPaths = treeIndex.totalPaths;
+      
+      // Create multi-level mod iterator for diverse path ordering
+      var modIterator = new MultiLevelModIterator(priorFile, treeIndex);
+      modIterator.open();
     } else if (startingPaths) {
       inMemoryPaths = startingPaths;
       totalInputPaths = startingPaths.length;
@@ -1174,7 +1513,16 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
         for (let i = 0; i < inMemoryPaths.length; i++) {
           yield { index: i, path: inMemoryPaths[i] };
         }
+      } else if (modIterator) {
+        // Multi-level mod iteration for diverse coverage
+        for (let step = 0; step < totalInputPaths; step++) {
+          const result = modIterator.getPathAtStep(step);
+          if (result && result.path) {
+            yield result;
+          }
+        }
       } else {
+        // Fallback: sequential file order
         const reader = new TreeReader(sourceFile);
         let idx = 0;
         for await (const path of reader.paths()) {
@@ -1203,6 +1551,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
           const hasIncomplete = isComplete.some(c => !c);
           if (hasIncomplete) {
             currentRound++;
+            pathsProcessedThisRound = 0;  // Reset for new round
             // Start new round - caller will call getNextWork again
             pathIterator = createPathIterator();
             currentPathIndex = 0;
@@ -1258,7 +1607,10 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
       console.log(`No continuation multiplier known for ${N_TEAMS} teams, week ${N_WEEKS}`);
     }
 
-    console.log(`Breadth-first: ${BREADTH} results per path per round`);
+    if (modIterator) {
+      console.log(`Diverse iteration: multi-level mod across all tree depths`);
+    }
+    console.log(`Breadth limit: ${BREADTH} results per path per round`);
 
     // ========================================================================
     // STEP 4: Create workers and set up message handling
@@ -1268,11 +1620,22 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     let workersFinished = 0;
     let shuttingDown = false;
     let pathsProcessed = 0;
+    let pathsProcessedThisRound = 0;  // Reset each round for progress display
+    let totalSchedulesChecked = 0;  // Track total continuations checked across all workers
+    let firstWorkTime = null;  // Track when first worker starts (for meaningful elapsed time)
 
     // Progress display
     function updateProgress(saveInfo = '') {
       const now = performance.now();
-      const elapsed = (now - workerStart) / 1000;
+
+      // Before first work assigned, show "initializing" message
+      if (!firstWorkTime) {
+        const warmupElapsed = (now - workerStart) / 1000;
+        process.stdout.write(`\r  Initializing... (${formatDuration(warmupElapsed)})${saveInfo}   `);
+        return;
+      }
+
+      const elapsed = (now - firstWorkTime) / 1000;
       const completedPaths = isComplete.filter(c => c).length;
 
       let pct, eta, progressStr;
@@ -1291,14 +1654,22 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
         progressStr = `${completedPaths}/${totalInputPaths} paths (${pct}%) | ${optimalCount} optimal`;
       }
 
-      progressStr += ` | round ${currentRound + 1}`;
+      // Add round info - paths processed this round vs total paths needing work
+      const pathsToProcess = totalInputPaths - completedPaths;  // Paths not yet fully exhausted
+      const roundPct = pathsToProcess > 0 ? ((pathsProcessedThisRound / pathsToProcess) * 100).toFixed(1) : '100.0';
+      progressStr += ` | round ${currentRound + 1} (${roundPct}% done)`;
+
+      // Add discarded count
+      const discarded = totalSchedulesChecked - optimalCount;
+      if (totalSchedulesChecked > 0) {
+        progressStr += ` | ${discarded.toLocaleString()} discarded`;
+      }
 
       process.stdout.write(`\r  ${progressStr} | ${formatDuration(elapsed)} elapsed | ${eta} remaining${saveInfo}   `);
     }
 
-    // Show initial progress
-    const initialEstimate = estimatedTotalOptimal ? `0/~${estimatedTotalOptimal.toLocaleString()}` : `0/${totalInputPaths} paths`;
-    process.stdout.write(`\r  ${initialEstimate} | round 1 | 0s elapsed | ? remaining   `);
+    // Show initial progress (initializing phase)
+    process.stdout.write(`\r  Initializing...   `);
 
     const progressInterval = setInterval(() => {
       updateProgress();
@@ -1323,6 +1694,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
             // Worker is ready - assign first work unit
             const work = await getNextWork();
             if (work) {
+              if (!firstWorkTime) firstWorkTime = performance.now();
               workerCurrentPath[i] = work.inputPath;
               worker.postMessage({ type: 'work', ...work });
             } else {
@@ -1356,11 +1728,15 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
             }
           } else if (msg.type === 'result') {
             // Worker finished a work unit
-            const { pathIndex, totalFound, isComplete: pathComplete } = msg;
+            const { pathIndex, totalFound, schedulesChecked, isComplete: pathComplete } = msg;
 
             foundCounts[pathIndex] = totalFound;
             isComplete[pathIndex] = pathComplete;
             pathsProcessed++;
+            pathsProcessedThisRound++;
+            if (schedulesChecked !== undefined) {
+              totalSchedulesChecked += schedulesChecked;
+            }
 
             // If path hit breadth limit (not complete), write … marker immediately
             if (!pathComplete && workerCurrentPath[i] && optimalWriter) {
@@ -1447,6 +1823,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
         console.log(`  ${inFlightPaths.length} in-flight + ${breadthLimitPaths.length} breadth-limited = ${allIncompletePaths.length} incomplete paths`);
 
         finalizeOptimalFile(false, allIncompletePaths).then(() => {
+          if (modIterator) modIterator.close();
           console.log(`  Saved ${optimalCount} complete paths to ${saveFile}`);
           console.log(`  Resume with: node calculate.mjs --teams=${N_TEAMS} --weeks=${N_WEEKS}`);
           clearInterval(progressInterval);
@@ -1460,6 +1837,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
         process.off('SIGINT', handleSigint);
         process.off('SIGTERM', handleSigint);
         clearInterval(progressInterval);
+        if (modIterator) modIterator.close();
         process.stdout.write('\n');
 
         // Collect incomplete paths from the map (works for both streaming and in-memory modes)
@@ -1469,16 +1847,22 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
           totalInputPaths,
           pathsProcessed,
           incompletePaths,
-          foundCounts
+          foundCounts,
+          firstWorkTime
         });
       }
     });
   }
 
-  runWorkers().then(async ({ totalInputPaths, pathsProcessed, incompletePaths, foundCounts }) => {
-    const elapsed = (performance.now() - workerStart) / 1000;
+  runWorkers().then(async ({ totalInputPaths, pathsProcessed, incompletePaths, foundCounts, firstWorkTime: fwt }) => {
+    const totalElapsed = (performance.now() - workerStart) / 1000;
+    const warmupTime = fwt ? (fwt - workerStart) / 1000 : totalElapsed;
+    const activeTime = fwt ? (performance.now() - fwt) / 1000 : 0;
 
-    console.log(`\nCompleted in ${elapsed.toFixed(2)}s`);
+    const timeStr = fwt 
+      ? `${formatDuration(totalElapsed)} total (${formatDuration(warmupTime)} warmup + ${formatDuration(activeTime)} active)`
+      : formatDuration(totalElapsed);
+    console.log(`\nCompleted in ${timeStr}`);
     console.log(`Optimal: ${optimalCount} with total doubleByes=${TARGET_SCORE[0]}, fiveSlotTeams=${TARGET_SCORE[1]}`);
 
     if (foundCounts && foundCounts.length > 0) {
@@ -1491,7 +1875,10 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
       }
     }
 
-    console.log(`Throughput: ${(optimalCount / elapsed).toFixed(0)} optimal/sec`);
+    const throughputTime = fwt ? activeTime : totalElapsed;
+    if (throughputTime > 0 && optimalCount > 0) {
+      console.log(`Throughput: ${(optimalCount / throughputTime).toFixed(0)} optimal/sec`);
+    }
 
     if (incompletePaths && incompletePaths.length > 0) {
       console.log(`Incomplete paths: ${incompletePaths.length} (breadth limit)`);
