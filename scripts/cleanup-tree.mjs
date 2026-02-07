@@ -1,261 +1,249 @@
 #!/usr/bin/env node
 // Cleanup tool: Reads a tree file and rewrites with optimal prefix compression
-// Usage: node --max-old-space-size=8192 scripts/cleanup-tree.mjs results/8teams-4weeks.txt
+// Uses streaming I/O and external sort to handle arbitrarily large files
+// Usage: node scripts/cleanup-tree.mjs results/8teams-4weeks.txt
 
-import { readFileSync, writeFileSync } from 'fs';
+import { createReadStream, createWriteStream, unlinkSync } from 'fs';
+import { createInterface } from 'readline';
+import { execSync } from 'child_process';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 const inputFile = process.argv[2];
 if (!inputFile) {
-  console.error('Usage: node --max-old-space-size=8192 scripts/cleanup-tree.mjs <file>');
-  console.error('Example: node --max-old-space-size=8192 scripts/cleanup-tree.mjs results/8teams-4weeks.txt');
+  console.error('Usage: node scripts/cleanup-tree.mjs <file>');
+  console.error('Example: node scripts/cleanup-tree.mjs results/8teams-4weeks.txt');
   process.exit(1);
 }
 
 console.log(`Reading ${inputFile}...`);
 const start = performance.now();
 
-const content = readFileSync(inputFile, 'utf8');
-const lines = content.split('\n');
+const tempFile = join(tmpdir(), `cleanup-${process.pid}-${Date.now()}.txt`);
+const sortedFile = tempFile + '.sorted';
 
-// Parse header
-const headerLine = lines[0];
-if (!headerLine.startsWith('#')) {
-  console.error('Error: File does not have a valid header');
-  process.exit(1);
+// Cleanup temp files on exit
+function cleanupTemp() {
+  try { unlinkSync(tempFile); } catch {}
+  try { unlinkSync(sortedFile); } catch {}
 }
+process.on('exit', cleanupTemp);
+process.on('SIGINT', () => { cleanupTemp(); process.exit(130); });
 
-// Extract header info
-const headerMatch = headerLine.match(/teams=(\d+).*weeks=(\d+).*count=(\d+)/);
-if (!headerMatch) {
-  console.error('Error: Could not parse header');
-  process.exit(1);
-}
+// ── Phase 1: Stream input, extract flat paths to temp file, track incomplete parents ──
 
-const [, teams, weeks, count] = headerMatch;
-const sourceIsPartial = headerLine.includes('(partial)');
-console.log(`  teams=${teams}, weeks=${weeks}, count=${count}${sourceIsPartial ? ' (partial)' : ''}`);
+let teams, weeks;
+let targetWeeks, numTeams, slotsPerWeek;
+let parentDepth, leafDepth;
+let pathCount = 0;
+// Memory note: parentFinalState can still grow large for huge inputs; for extreme cases, a two-pass stream can avoid tracking all parents.
+const parentFinalState = new Map();  // key -> {hasChildren, markedIncomplete}
 
-// Extract all complete paths and track the FINAL state of each parent path
-// A parent is incomplete only if its LAST occurrence in the file has an incomplete marker
-// (If a later pass completed the exploration, the parent should NOT be marked incomplete)
-console.log('Extracting paths...');
-const paths = [];
-const parentFinalState = new Map();  // key -> {hasChildren: bool, markedIncomplete: bool}
-let currentPath = [];
-let currentParentKey = null;
-let currentParentHasChildren = false;
-let currentParentMarkedIncomplete = false;
+{
+  const rl = createInterface({ input: createReadStream(inputFile), crlfDelay: Infinity });
+  const tempStream = createWriteStream(tempFile);
 
-const targetWeeks = parseInt(weeks);
-const parentDepth = targetWeeks - 2;  // Depth of parent nodes (0-indexed, e.g., depth 1 for 3-week file)
-const leafDepth = targetWeeks - 1;    // Depth of leaf nodes (e.g., depth 2 for 3-week file)
+  let lineNum = 0;
+  let currentPath = [];   // stores schedule strings (not parsed arrays)
+  let currentParentKey = null;
+  let currentParentHasChildren = false;
+  let currentParentMarkedIncomplete = false;
+  let warningCount = 0;
+  const MAX_WARNINGS = 10;
 
-function finalizeParent() {
-  if (currentParentKey !== null) {
-    // Update or set the final state for this parent
-    // Each time we see a parent, we overwrite its state (so last occurrence wins)
-    parentFinalState.set(currentParentKey, {
-      hasChildren: currentParentHasChildren,
-      markedIncomplete: currentParentMarkedIncomplete
-    });
-  }
-}
-
-for (let i = 1; i < lines.length; i++) {
-  const line = lines[i];
-  if (!line.trim()) continue;
-  
-  const depth = line.match(/^\t*/)[0].length;
-  const content = line.trim();
-  
-  // Handle incomplete markers
-  if (content === '…') {
-    // Mark current parent as incomplete (if we're at leaf depth, meaning parent is incomplete)
-    if (depth === leafDepth && currentParentKey !== null) {
-      currentParentMarkedIncomplete = true;
+  function finalizeParent() {
+    if (currentParentKey !== null) {
+      parentFinalState.set(currentParentKey, {
+        hasChildren: currentParentHasChildren,
+        markedIncomplete: currentParentMarkedIncomplete
+      });
     }
-    continue;
   }
-  
-  const schedule = content.split(',').map(Number);
-  
-  // Skip invalid schedules (NaN values, wrong length, etc.)
-  if (schedule.some(n => !Number.isFinite(n)) || schedule.length !== 12) {
-    console.log(`  WARNING: Skipping invalid schedule at line ${i + 1}: ${content}`);
-    continue;
-  }
-  
-  // Check if we're changing parents
-  if (depth <= parentDepth) {
-    // We're at or above parent depth - finalize previous parent
-    finalizeParent();
-    
-    // Update current path
-    currentPath = currentPath.slice(0, depth);
-    currentPath.push(schedule);
-    
-    // If we're exactly at parent depth, start tracking a new parent
-    if (depth === parentDepth) {
-      currentParentKey = currentPath.map(s => s.join(',')).join('|');
-      currentParentHasChildren = false;
-      currentParentMarkedIncomplete = false;
+
+  for await (const line of rl) {
+    lineNum++;
+
+    // ── Header ──
+    if (lineNum === 1) {
+      if (!line.startsWith('#')) { console.error('Error: File does not have a valid header'); process.exit(1); }
+      const m = line.match(/teams=(\d+).*weeks=(\d+).*count=(\d+)/);
+      if (!m) { console.error('Error: Could not parse header'); process.exit(1); }
+      teams = m[1]; weeks = m[2];
+      const sourceIsPartial = line.includes('(partial)');
+      console.log(`  teams=${teams}, weeks=${weeks}, count=${m[3]}${sourceIsPartial ? ' (partial)' : ''}`);
+      targetWeeks = parseInt(weeks);
+      numTeams = parseInt(teams);
+      slotsPerWeek = 3 * (numTeams / 2);
+      parentDepth = targetWeeks - 2;
+      leafDepth = targetWeeks - 1;
+      console.log('Extracting paths...');
+      continue;
+    }
+
+    if (!line.trim()) continue;
+
+    const depth = line.match(/^\t*/)[0].length;
+    const content = line.trim();
+
+    // Handle incomplete markers
+    if (content === '…') {
+      if (depth === leafDepth && currentParentKey !== null) {
+        currentParentMarkedIncomplete = true;
+      }
+      continue;
+    }
+
+    // Validate schedule
+    const parts = content.split(',');
+    if (parts.length !== slotsPerWeek || parts.some(p => p === '' || !Number.isFinite(Number(p)))) {
+      warningCount++;
+      if (warningCount <= MAX_WARNINGS) {
+        console.log(`  WARNING: Skipping invalid schedule at line ${lineNum}: ${content}`);
+      }
+      continue;
+    }
+
+    if (depth <= parentDepth) {
+      finalizeParent();
+      currentPath = currentPath.slice(0, depth);
+      currentPath.push(content);
+
+      if (depth === parentDepth) {
+        currentParentKey = currentPath.join('|');
+        currentParentHasChildren = false;
+        currentParentMarkedIncomplete = false;
+      } else {
+        currentParentKey = null;
+      }
     } else {
-      // We're above parent depth, no current parent
-      currentParentKey = null;
+      currentPath = currentPath.slice(0, depth);
+      currentPath.push(content);
+
+      if (depth === leafDepth) {
+        currentParentHasChildren = true;
+        pathCount++;
+        tempStream.write(currentPath.join('|') + '\n');
+      }
     }
-  } else {
-    // We're below parent depth (at leaf level)
-    currentPath = currentPath.slice(0, depth);
-    currentPath.push(schedule);
-    
-    if (depth === leafDepth) {
-      currentParentHasChildren = true;
-      paths.push(currentPath.map(s => [...s])); // Deep copy
+
+    if (lineNum % 5_000_000 === 0) {
+      console.log(`  ...processed ${lineNum.toLocaleString()} lines, ${pathCount.toLocaleString()} paths`);
     }
   }
+
+  finalizeParent();
+
+  if (warningCount > MAX_WARNINGS) {
+    console.log(`  ...${(warningCount - MAX_WARNINGS).toLocaleString()} more invalid schedule warnings suppressed`);
+  }
+
+  await new Promise((resolve, reject) => { tempStream.end(resolve); tempStream.on('error', reject); });
+  console.log(`  Extracted ${pathCount.toLocaleString()} paths`);
 }
 
-// Don't forget to finalize the last parent
-finalizeParent();
-
-// Count how many parents are incomplete (last occurrence had marker)
-// If a parent's LAST occurrence has an incomplete marker, more children may exist
-// (regardless of whether any children were found in that final occurrence)
+// Collect incomplete parent keys, then free the map
 const incompleteParentKeys = new Set();
-let completedInLaterPass = 0;
 for (const [key, state] of parentFinalState) {
-  if (state.markedIncomplete) {
-    // Last occurrence had marker - this parent is incomplete
-    incompleteParentKeys.add(key);
-  } else if (state.hasChildren) {
-    // Last occurrence had children but NO marker - completed in a later pass
-    // (We don't need to track these, but count for info)
-  }
+  if (state.markedIncomplete) incompleteParentKeys.add(key);
+}
+parentFinalState.clear();
+console.log(`  ${incompleteParentKeys.size.toLocaleString()} parent paths remain incomplete (last occurrence had marker)`);
+
+if (pathCount === 0) {
+  const outputFile = inputFile.replace('.txt', '-clean.txt');
+  const { writeFileSync } = await import('fs');
+  writeFileSync(outputFile, `# teams=${teams} weeks=${weeks} count=0\n`);
+  console.log(`\nNo paths found. Wrote empty output to ${outputFile}`);
+  process.exit(0);
 }
 
-// Count parents that had markers in earlier passes but were completed later
-// (Their last occurrence has children but no marker)
-for (const [key, state] of parentFinalState) {
-  if (!state.markedIncomplete && state.hasChildren) {
-    // This parent's last occurrence was complete - check if earlier occurrences had markers
-    // (We can't easily tell from this data, but the difference from total parents gives us a clue)
-  }
-}
+// ── Phase 2: External sort + deduplicate ──
 
-console.log(`  Extracted ${paths.length} complete paths`);
-console.log(`  ${incompleteParentKeys.size} parent paths remain incomplete (last occurrence had marker)`);
+console.log('Sorting and deduplicating (external sort)...');
+execSync(`LC_ALL=C sort -u -o "${sortedFile}" "${tempFile}"`, { maxBuffer: 10 * 1024 * 1024 });
+try { unlinkSync(tempFile); } catch {}
 
-// Free memory from original content
-lines.length = 0;
-
-// Sort paths lexicographically
-console.log('Sorting paths...');
-paths.sort((a, b) => {
-  for (let i = 0; i < Math.min(a.length, b.length); i++) {
-    const cmp = a[i].join(',').localeCompare(b[i].join(','));
-    if (cmp !== 0) return cmp;
-  }
-  return a.length - b.length;
-});
-
-// Deduplicate using a Set for exactness
-console.log('Deduplicating...');
-const beforeDedup = paths.length;
-const pathToKey = p => p.map(s => s.join(',')).join('|');
-const seenKeys = new Set();
-let writeIdx = 0;
-for (let i = 0; i < paths.length; i++) {
-  const currKey = pathToKey(paths[i]);
-  if (!seenKeys.has(currKey)) {
-    seenKeys.add(currKey);
-    paths[writeIdx] = paths[i];
-    writeIdx++;
-  }
-}
-paths.length = writeIdx;
-const duplicatesRemoved = beforeDedup - paths.length;
+const uniqueCount = parseInt(execSync(`wc -l < "${sortedFile}"`).toString().trim());
+const duplicatesRemoved = pathCount - uniqueCount;
 if (duplicatesRemoved > 0) {
   console.log(`  Removed ${duplicatesRemoved.toLocaleString()} duplicates`);
 }
+console.log(`  ${uniqueCount.toLocaleString()} unique paths`);
 
-// Write with optimal prefix compression, adding … markers for incomplete branches
+// ── Phase 3: Stream sorted file, write compressed output ──
+
 console.log('Writing compressed output...');
-const outputLines = [];
-let prevPath = [];
-let lastParentKey = null;
-let needsIncompleteMarker = false;
-
-for (const path of paths) {
-  // Check if we're changing parents (at depth weeks-1)
-  const parentKey = path.slice(0, parseInt(weeks) - 1).map(s => s.join(',')).join('|');
-  
-  if (lastParentKey !== null && lastParentKey !== parentKey) {
-    // Parent changed - check if previous parent was incomplete
-    if (needsIncompleteMarker) {
-      outputLines.push('\t'.repeat(leafDepth) + '…');
-    }
-  }
-  
-  // Find common prefix depth
-  let commonDepth = 0;
-  while (commonDepth < prevPath.length && 
-         commonDepth < path.length &&
-         prevPath[commonDepth].join(',') === path[commonDepth].join(',')) {
-    commonDepth++;
-  }
-  
-  // Write nodes from divergence point onwards
-  for (let depth = commonDepth; depth < path.length; depth++) {
-    outputLines.push('\t'.repeat(depth) + path[depth].join(','));
-  }
-  
-  prevPath = path;
-  lastParentKey = parentKey;
-  needsIncompleteMarker = incompleteParentKeys.has(parentKey);
-}
-
-// Don't forget the last parent's incomplete marker
-if (needsIncompleteMarker) {
-  outputLines.push('\t'.repeat(leafDepth) + '…');
-}
-
-// Count unique prefixes at each depth for stats (skip incomplete markers)
-const uniqueByDepth = [];
-for (let d = 0; d < parseInt(weeks); d++) {
-  uniqueByDepth.push(new Set());
-}
-currentPath = [];
-for (const line of outputLines) {
-  if (line.trim() === '…') continue;  // Skip incomplete markers in stats
-  const depth = line.match(/^\t*/)[0].length;
-  if (depth >= parseInt(weeks)) continue;  // Safety check
-  currentPath = currentPath.slice(0, depth);
-  currentPath.push(line.trim());
-  uniqueByDepth[depth].add(currentPath.join('|'));
-}
-
-// Determine if output should be marked partial
-// Only mark as partial if there are ACTUAL incomplete markers in the output
-// (source being partial doesn't matter if all branches are now complete)
-const hasIncompleteMarkers = outputLines.some(l => l.trim() === '…');
-const outputIsPartial = hasIncompleteMarkers;
-
-// Write output
-const partialMarker = outputIsPartial ? ' (partial)' : '';
-const header = `# teams=${teams} weeks=${weeks} count=${paths.length}${partialMarker}`;
 const outputFile = inputFile.replace('.txt', '-clean.txt');
-writeFileSync(outputFile, header + '\n' + outputLines.join('\n') + '\n');
 
-const elapsed = ((performance.now() - start) / 1000).toFixed(2);
-console.log(`\nDone in ${elapsed}s`);
-console.log(`Output: ${outputFile}${outputIsPartial ? ' (partial)' : ''}`);
-console.log(`Lines: ${outputLines.length + 1} (was ${content.split('\n').length})`);
-if (hasIncompleteMarkers) {
-  const markerCount = outputLines.filter(l => l.trim() === '…').length;
-  console.log(`Incomplete markers preserved: ${markerCount}`);
-}
-console.log('\nCompression stats by depth:');
-for (let d = 0; d < uniqueByDepth.length; d++) {
-  const linesAtDepth = outputLines.filter(l => l.match(/^\t*/)[0].length === d).length;
-  console.log(`  Week ${d + 1}: ${uniqueByDepth[d].size} unique = ${linesAtDepth} lines (1.0x)`);
+{
+  const rl = createInterface({ input: createReadStream(sortedFile), crlfDelay: Infinity });
+  const outStream = createWriteStream(outputFile);
+
+  const hasIncomplete = incompleteParentKeys.size > 0;
+  const partialMarker = hasIncomplete ? ' (partial)' : '';
+  outStream.write(`# teams=${teams} weeks=${weeks} count=${uniqueCount}${partialMarker}\n`);
+
+  let prevParts = [];
+  let lastParentKey = null;
+  let needsIncompleteMarker = false;
+  let outputLineCount = 1;  // header
+  const linesPerDepth = new Array(targetWeeks).fill(0);
+  let incompleteMarkerCount = 0;
+
+  for await (const line of rl) {
+    const parts = line.split('|');
+
+    // Check parent change for incomplete markers
+    const parentKey = parts.slice(0, targetWeeks - 1).join('|');
+
+    if (lastParentKey !== null && lastParentKey !== parentKey) {
+      if (needsIncompleteMarker) {
+        outStream.write('\t'.repeat(leafDepth) + '…\n');
+        outputLineCount++;
+        incompleteMarkerCount++;
+      }
+    }
+
+    // Find common prefix depth
+    let commonDepth = 0;
+    while (commonDepth < prevParts.length &&
+           commonDepth < parts.length &&
+           prevParts[commonDepth] === parts[commonDepth]) {
+      commonDepth++;
+    }
+
+    // Write nodes from divergence point onwards
+    for (let depth = commonDepth; depth < parts.length; depth++) {
+      outStream.write('\t'.repeat(depth) + parts[depth] + '\n');
+      outputLineCount++;
+      if (depth < targetWeeks) linesPerDepth[depth]++;
+    }
+
+    prevParts = parts;
+    lastParentKey = parentKey;
+    needsIncompleteMarker = incompleteParentKeys.has(parentKey);
+  }
+
+  // Last parent's incomplete marker
+  if (needsIncompleteMarker) {
+    outStream.write('\t'.repeat(leafDepth) + '…\n');
+    outputLineCount++;
+    incompleteMarkerCount++;
+  }
+
+  await new Promise((resolve, reject) => { outStream.end(resolve); outStream.on('error', reject); });
+
+  try { unlinkSync(sortedFile); } catch {}
+
+  const elapsed = ((performance.now() - start) / 1000).toFixed(2);
+  console.log(`\nDone in ${elapsed}s`);
+  console.log(`Output: ${outputFile}${partialMarker}`);
+  console.log(`Lines: ${outputLineCount.toLocaleString()}`);
+  if (incompleteMarkerCount > 0) {
+    console.log(`Incomplete markers preserved: ${incompleteMarkerCount.toLocaleString()}`);
+  }
+  console.log('\nCompression stats by depth:');
+  for (let d = 0; d < targetWeeks; d++) {
+    console.log(`  Week ${d + 1}: ${linesPerDepth[d].toLocaleString()} lines`);
+  }
 }
