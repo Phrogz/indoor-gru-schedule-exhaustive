@@ -4,7 +4,7 @@
 import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
 import { cpus } from 'os';
 import { fileURLToPath } from 'url';
-import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync, openSync, readSync, closeSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync, openSync, readSync, closeSync, copyFileSync } from 'fs';
 import { createReadStream } from 'fs';
 import { createInterface } from 'readline';
 import { TreeWriter, TreeReader, parseHeader, readHeaderFromFile } from './lib/tree-format.mjs';
@@ -1280,6 +1280,20 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     () => new Set(),
   );  // For deduplication during resume - use hashes instead of full keys
   const saveFile = `results/${N_TEAMS}teams-${N_WEEKS}week${N_WEEKS > 1 ? 's' : ''}.txt`;
+  if (!VALIDATE && resumeData && priorFile && priorFile === saveFile && existsSync(saveFile)) {
+    const now = new Date();
+    const stamp = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, '0'),
+      String(now.getDate()).padStart(2, '0'),
+      String(now.getHours()).padStart(2, '0'),
+      String(now.getMinutes()).padStart(2, '0'),
+    ].join('');
+    const backupFile = saveFile.replace(/\.txt$/, `.${stamp}.txt`);
+    copyFileSync(saveFile, backupFile);
+    resumeData.readFile = backupFile;
+    console.log(`Backed up resume source to ${backupFile}`);
+  }
 
   // Hash a path to BigInt for deduplication (64-bit to minimize collisions at scale)
   // With 5M+ items, 32-bit hash has ~4000 expected collisions; 64-bit has ~1e-6
@@ -1391,6 +1405,10 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     return optimalCount;
   }
 
+  function commitSaveFileIfNeeded() {
+    return { committed: true, path: saveFile };
+  }
+
   // Format duration for human readability
   function formatDuration(seconds) {
     if (seconds < 60) return `${Math.round(seconds)}s`;
@@ -1429,11 +1447,15 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     let totalInputPaths = 0;
     let resumeFilter = null;    // { completedKeys, incompleteKeys } for resume streaming
 
-    if (resumeData && priorFile && existsSync(priorFile)) {
+    if (resumeData && priorFile) {
+      const resumeReadFile = resumeData.readFile || priorFile;
+      if (!existsSync(resumeReadFile)) {
+        throw new Error(`Resume read file not found: ${resumeReadFile}`);
+      }
       // Resume mode: copy existing results, then load ALL source paths
       // (filtering out completed ones, marking incomplete ones for resume)
-      console.log(`Copying existing complete paths from ${priorFile}...`);
-      const reader = new TreeReader(priorFile);
+      console.log(`Copying existing complete paths from ${resumeReadFile}...`);
+      const reader = new TreeReader(resumeReadFile);
       let existingCount = 0;
       let batchPaths = [];
       const BATCH_SIZE = 10000;
@@ -1862,8 +1884,9 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
         console.log(`  ${inFlightPaths.length} in-flight + ${breadthLimitPaths.length} breadth-limited = ${allIncompletePaths.length} incomplete paths`);
 
         finalizeOptimalFile(false, allIncompletePaths).then(() => {
+          const commitInfo = commitSaveFileIfNeeded();
           if (modIterator) modIterator.close();
-          console.log(`  Saved ${optimalCount} complete paths to ${saveFile}`);
+          console.log(`  Saved ${optimalCount} complete paths to ${commitInfo.path}`);
           console.log(`  Resume with: node calculate.mjs --teams=${N_TEAMS} --weeks=${N_WEEKS}`);
           clearInterval(progressInterval);
           process.exit(0);
@@ -1927,7 +1950,8 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     if (optimalCount > 0 && !VALIDATE) {
       const isPartial = incompletePaths && incompletePaths.length > 0;
       await finalizeOptimalFile(!isPartial, isPartial ? incompletePaths : []);
-      console.log(`Saved ${optimalCount} optimal paths to ${saveFile}${isPartial ? ' (partial)' : ''}`);
+      const commitInfo = commitSaveFileIfNeeded();
+      console.log(`Saved ${optimalCount} optimal paths to ${commitInfo.path}${isPartial ? ' (partial)' : ''}`);
     }
   }).catch((err) => {
     console.error('Worker error:', err);
