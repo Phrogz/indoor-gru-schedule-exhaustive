@@ -2,24 +2,24 @@
 // Reads multi-week schedules and scores them using weighted pain metrics
 
 import { writeFileSync } from 'fs';
+import { performance } from 'perf_hooks';
 import { TreeReader } from './lib/tree-format.mjs';
 
 // ============================================================================
 // Configuration
 // ============================================================================
 
-const overallPainMultipliers = {
-	doubleHeaderPain: 0.05,
-	unfairDoubleHeaderPain: 0.5,
-	// doubleByePain: 3,
-	unfairDoubleByePain: 0.5,
-	totalSlotsPain: 0.01,
-	unfairSlotsPain: 0.1,
-	// unfairPainPerTeam: 0.3,
-	unfairEarlyLate: 0.4,
-	unfair3rdVs2nd: 0.5,
-	unevenMatchups: 1.0,
+const painConfig = {
+	doubleHeaderPain: { overall: 0.4,  unfairness: 1 },
+	doubleByePain:    { overall: 0.2,  unfairness: 2 },
+	totalSlotsPain:   { overall: 0.05, unfairness: 2 },
+	earlyWeeks:       { overall: 0.01, unfairness: 1 },
+	lateWeeks:        { overall: 0.01, unfairness: 1 },
+	thirdVs2nd:       { overall: 0.05, unfairness: 5 },
+	// Schedules coming in should not have any uneven matchups
+	// unevenMatchups: { overall: 99.0, unfairness: 0 },
 };
+const unfairnessOverallWeight = 1;
 
 // ============================================================================
 // CLI Argument Parsing
@@ -68,6 +68,7 @@ Outputs best schedules to results/{N}teams-{W}weeks-best.txt
 
 const CLI_ARGS = parseArgs();
 let N_TEAMS, N_WEEKS, TEAMS, N_SLOTS, N_MATCHUPS, matchupToTeams;
+const painTiming = new Map();
 
 function initConstants(teams, weeks) {
 	N_TEAMS = teams;
@@ -95,9 +96,15 @@ function initConstants(teams, weeks) {
 
 function stddev(values) {
 	if (values.length === 0) return 0;
-	const mean = values.reduce((a, b) => a + b, 0) / values.length;
-	const squaredDiffs = values.map(v => (v - mean) ** 2);
-	return Math.sqrt(squaredDiffs.reduce((a, b) => a + b, 0) / values.length);
+	let total = 0;
+	for (let i = 0; i < values.length; i++) total += values[i];
+	const mean = total / values.length;
+	let squaredSum = 0;
+	for (let i = 0; i < values.length; i++) {
+		const diff = values[i] - mean;
+		squaredSum += diff * diff;
+	}
+	return Math.sqrt(squaredSum / values.length);
 }
 
 function sum(values) {
@@ -187,32 +194,59 @@ const weekMetrics = {
 	},
 
 	/**
-	 * Count of games in first two slots (0, 1) per team
+	 * Count of weeks where each team plays in the first two slots (0, 1)
 	 */
-	earlyGamesByTeam(schedule, nTeams, nSlots) {
-		const counts = new Uint8Array(nTeams);
-		for (let s = 0; s < Math.min(2, nSlots); s++) {
+	earlyWeeksByTeam(schedule, nTeams, nSlots) {
+		const slotsByTeam = [];
+		for (let ti = 0; ti < nTeams; ti++) slotsByTeam.push([]);
+
+		for (let s = 0; s < nSlots; s++) {
 			const m = schedule[s];
 			const t1 = matchupToTeams[m * 2];
 			const t2 = matchupToTeams[m * 2 + 1];
-			counts[t1]++;
-			counts[t2]++;
+			slotsByTeam[t1].push(s);
+			slotsByTeam[t2].push(s);
+		}
+
+		const counts = new Uint8Array(nTeams);
+		const earlyCutoff = Math.min(2, nSlots);
+		for (let ti = 0; ti < nTeams; ti++) {
+			const slots = slotsByTeam[ti];
+			for (let i = 0; i < slots.length; i++) {
+				if (slots[i] < earlyCutoff) {
+					counts[ti] = 1;
+					break;
+				}
+			}
 		}
 		return counts;
 	},
 
 	/**
-	 * Count of games in last two slots per team
+	 * Count of weeks where each team plays in the last two slots
 	 */
-	lateGamesByTeam(schedule, nTeams, nSlots) {
-		const counts = new Uint8Array(nTeams);
-		const startSlot = Math.max(0, nSlots - 2);
-		for (let s = startSlot; s < nSlots; s++) {
+	lateWeeksByTeam(schedule, nTeams, nSlots) {
+		const slotsByTeam = [];
+		for (let ti = 0; ti < nTeams; ti++) slotsByTeam.push([]);
+
+		for (let s = 0; s < nSlots; s++) {
 			const m = schedule[s];
 			const t1 = matchupToTeams[m * 2];
 			const t2 = matchupToTeams[m * 2 + 1];
-			counts[t1]++;
-			counts[t2]++;
+			slotsByTeam[t1].push(s);
+			slotsByTeam[t2].push(s);
+		}
+
+		const counts = new Uint8Array(nTeams);
+		const startSlot = Math.max(0, nSlots - 2);
+		for (let ti = 0; ti < nTeams; ti++) {
+			const slots = slotsByTeam[ti];
+			for (let i = 0; i < slots.length; i++) {
+				if (slots[i] >= startSlot) {
+					counts[ti] = 1;
+					break;
+				}
+			}
 		}
 		return counts;
 	},
@@ -269,16 +303,27 @@ function getWeekMetrics(schedule) {
 	for (const [name, fn] of Object.entries(weekMetrics)) {
 		results[name] = fn(schedule, N_TEAMS, N_SLOTS);
 	}
+	if (results.weekSlotsByTeam) {
+		const spans = new Uint8Array(N_TEAMS);
+		for (let ti = 0; ti < N_TEAMS; ti++) {
+			const slots = results.weekSlotsByTeam[ti];
+			if (slots.length > 0) {
+				spans[ti] = slots[slots.length - 1] - slots[0] + 1;
+			}
+		}
+		results.weekSlotSpanByTeam = spans;
+	}
 	weekMetricCache.set(key, results);
 	return results;
 }
 
 // ============================================================================
-// Overall Pain Functions
-// Each has score() returning a number and explain() returning a string
+// Base Pain Functions
+// Each has score() returning a total, perTeam() returning per-team array,
+// and explain() returning a display string
 // ============================================================================
 
-const overallPainFunctions = {
+const basePainFunctions = {
 	/**
 	 * Sum of all teams' double-header counts across all weeks
 	 */
@@ -292,38 +337,17 @@ const overallPainFunctions = {
 			}
 			return total;
 		},
-		explain(weekResults, nTeams) {
+		perTeam(weekResults, nTeams) {
 			const perTeam = new Array(nTeams).fill(0);
 			for (const week of weekResults) {
 				for (let ti = 0; ti < nTeams; ti++) {
 					perTeam[ti] += week.doubleHeaderCountByTeam[ti];
 				}
 			}
-			return perTeam.map((c, i) => `${TEAMS[i]}:${c}`).join(' ');
-		},
-	},
-
-	/**
-	 * Stddev of double-header counts per team across all weeks
-	 */
-	unfairDoubleHeaderPain: {
-		score(weekResults, nTeams) {
-			const perTeam = new Array(nTeams).fill(0);
-			for (const week of weekResults) {
-				for (let ti = 0; ti < nTeams; ti++) {
-					perTeam[ti] += week.doubleHeaderCountByTeam[ti];
-				}
-			}
-			return stddev(perTeam);
+			return perTeam;
 		},
 		explain(weekResults, nTeams) {
-			const perTeam = new Array(nTeams).fill(0);
-			for (const week of weekResults) {
-				for (let ti = 0; ti < nTeams; ti++) {
-					perTeam[ti] += week.doubleHeaderCountByTeam[ti];
-				}
-			}
-			return perTeam.map((c, i) => `${TEAMS[i]}:${c}`).join(' ');
+			return this.perTeam(weekResults, nTeams).map((c, i) => `${TEAMS[i]}:${c}`).join(' ');
 		},
 	},
 
@@ -340,38 +364,17 @@ const overallPainFunctions = {
 			}
 			return total;
 		},
-		explain(weekResults, nTeams) {
+		perTeam(weekResults, nTeams) {
 			const perTeam = new Array(nTeams).fill(0);
 			for (const week of weekResults) {
 				for (let ti = 0; ti < nTeams; ti++) {
 					perTeam[ti] += week.doubleByeCountByTeam[ti];
 				}
 			}
-			return perTeam.map((c, i) => `${TEAMS[i]}:${c}`).join(' ');
-		},
-	},
-
-	/**
-	 * Stddev of double-bye counts per team across all weeks
-	 */
-	unfairDoubleByePain: {
-		score(weekResults, nTeams) {
-			const perTeam = new Array(nTeams).fill(0);
-			for (const week of weekResults) {
-				for (let ti = 0; ti < nTeams; ti++) {
-					perTeam[ti] += week.doubleByeCountByTeam[ti];
-				}
-			}
-			return stddev(perTeam);
+			return perTeam;
 		},
 		explain(weekResults, nTeams) {
-			const perTeam = new Array(nTeams).fill(0);
-			for (const week of weekResults) {
-				for (let ti = 0; ti < nTeams; ti++) {
-					perTeam[ti] += week.doubleByeCountByTeam[ti];
-				}
-			}
-			return perTeam.map((c, i) => `${TEAMS[i]}:${c}`).join(' ');
+			return this.perTeam(weekResults, nTeams).map((c, i) => `${TEAMS[i]}:${c}`).join(' ');
 		},
 	},
 
@@ -385,139 +388,111 @@ const overallPainFunctions = {
 				for (let ti = 0; ti < nTeams; ti++) {
 					const slots = week.weekSlotsByTeam[ti];
 					if (slots.length > 0) {
-						const span = slots[slots.length - 1] - slots[0] + 1;
-						total += span;
+						total += slots[slots.length - 1] - slots[0] + 1;
 					}
 				}
 			}
 			return total;
 		},
+		perTeam(weekResults, nTeams) {
+			const perTeam = new Array(nTeams).fill(0);
+			for (const week of weekResults) {
+				const spans = week.weekSlotSpanByTeam;
+				for (let ti = 0; ti < nTeams; ti++) {
+					perTeam[ti] += spans[ti];
+				}
+			}
+			return perTeam;
+		},
 		explain(weekResults, nTeams) {
+			return this.perTeam(weekResults, nTeams).map((c, i) => `${TEAMS[i]}:${c}`).join(' ');
+		},
+	},
+
+	/**
+	 * Sum of early-week counts per team across all weeks
+	 */
+	earlyWeeks: {
+		score(weekResults, nTeams) {
 			let total = 0;
 			for (const week of weekResults) {
 				for (let ti = 0; ti < nTeams; ti++) {
-					const slots = week.weekSlotsByTeam[ti];
-					if (slots.length > 0) {
-						total += slots[slots.length - 1] - slots[0] + 1;
-					}
+					total += week.earlyWeeksByTeam[ti];
 				}
 			}
-			return `${total} total slots spanned`;
+			return total;
 		},
-	},
-
-	/**
-	 * Stddev across teams of (sum of slot spans per team across all weeks)
-	 */
-	unfairSlotsPain: {
-		score(weekResults, nTeams) {
+		perTeam(weekResults, nTeams) {
 			const perTeam = new Array(nTeams).fill(0);
 			for (const week of weekResults) {
 				for (let ti = 0; ti < nTeams; ti++) {
-					const slots = week.weekSlotsByTeam[ti];
-					if (slots.length > 0) {
-						const span = slots[slots.length - 1] - slots[0] + 1;
-						perTeam[ti] += span;
-					}
+					perTeam[ti] += week.earlyWeeksByTeam[ti];
 				}
 			}
-			return stddev(perTeam);
+			return perTeam;
 		},
 		explain(weekResults, nTeams) {
-			const perTeam = new Array(nTeams).fill(0);
-			for (const week of weekResults) {
-				for (let ti = 0; ti < nTeams; ti++) {
-					const slots = week.weekSlotsByTeam[ti];
-					if (slots.length > 0) {
-						const span = slots[slots.length - 1] - slots[0] + 1;
-						perTeam[ti] += span;
-					}
-				}
-			}
-			return perTeam.map((c, i) => `${TEAMS[i]}:${c}`).join(' ');
+			return this.perTeam(weekResults, nTeams).map((c, i) => `${TEAMS[i]}:${c}`).join(' ');
 		},
 	},
 
 	/**
-	 * Stddev across teams of (sum of doubleHeader + doubleBye pain per team)
+	 * Sum of late-week counts per team across all weeks
 	 */
-	unfairPainPerTeam: {
+	lateWeeks: {
 		score(weekResults, nTeams) {
+			let total = 0;
+			for (const week of weekResults) {
+				for (let ti = 0; ti < nTeams; ti++) {
+					total += week.lateWeeksByTeam[ti];
+				}
+			}
+			return total;
+		},
+		perTeam(weekResults, nTeams) {
 			const perTeam = new Array(nTeams).fill(0);
 			for (const week of weekResults) {
 				for (let ti = 0; ti < nTeams; ti++) {
-					perTeam[ti] += week.doubleHeaderCountByTeam[ti];
-					perTeam[ti] += week.doubleByeCountByTeam[ti];
+					perTeam[ti] += week.lateWeeksByTeam[ti];
 				}
 			}
-			return stddev(perTeam);
+			return perTeam;
 		},
 		explain(weekResults, nTeams) {
-			const perTeam = new Array(nTeams).fill(0);
-			for (const week of weekResults) {
-				for (let ti = 0; ti < nTeams; ti++) {
-					perTeam[ti] += week.doubleHeaderCountByTeam[ti];
-					perTeam[ti] += week.doubleByeCountByTeam[ti];
-				}
-			}
-			return perTeam.map((c, i) => `${TEAMS[i]}:${c}`).join(' ');
+			return this.perTeam(weekResults, nTeams).map((c, i) => `${TEAMS[i]}:${c}`).join(' ');
 		},
 	},
 
 	/**
-	 * Stddev of early games per team + stddev of late games per team
+	 * Sum of times each team plays their 3rd game against another team's 2nd
 	 */
-	unfairEarlyLate: {
+	thirdVs2nd: {
 		score(weekResults, nTeams) {
-			const earlyPerTeam = new Array(nTeams).fill(0);
-			const latePerTeam = new Array(nTeams).fill(0);
+			let total = 0;
 			for (const week of weekResults) {
 				for (let ti = 0; ti < nTeams; ti++) {
-					earlyPerTeam[ti] += week.earlyGamesByTeam[ti];
-					latePerTeam[ti] += week.lateGamesByTeam[ti];
+					total += week.game3rdVs2ndByTeam[ti];
 				}
 			}
-			return stddev(earlyPerTeam) + stddev(latePerTeam);
+			return total;
 		},
-		explain(weekResults, nTeams) {
-			const earlyPerTeam = new Array(nTeams).fill(0);
-			const latePerTeam = new Array(nTeams).fill(0);
-			for (const week of weekResults) {
-				for (let ti = 0; ti < nTeams; ti++) {
-					earlyPerTeam[ti] += week.earlyGamesByTeam[ti];
-					latePerTeam[ti] += week.lateGamesByTeam[ti];
-				}
-			}
-			return TEAMS.map((t, i) => `${t}:[${earlyPerTeam[i]},${latePerTeam[i]}]`).join(' ');
-		},
-	},
-
-	/**
-	 * Stddev of times each team plays their 3rd game against another team's 2nd
-	 */
-	unfair3rdVs2nd: {
-		score(weekResults, nTeams) {
+		perTeam(weekResults, nTeams) {
 			const perTeam = new Array(nTeams).fill(0);
 			for (const week of weekResults) {
 				for (let ti = 0; ti < nTeams; ti++) {
 					perTeam[ti] += week.game3rdVs2ndByTeam[ti];
 				}
 			}
-			return stddev(perTeam);
+			return perTeam;
 		},
 		explain(weekResults, nTeams) {
-			const perTeam = new Array(nTeams).fill(0);
-			for (const week of weekResults) {
-				for (let ti = 0; ti < nTeams; ti++) {
-					perTeam[ti] += week.game3rdVs2ndByTeam[ti];
-				}
-			}
-			return perTeam.map((c, i) => `${TEAMS[i]}:${c}`).join(' ');
+			return this.perTeam(weekResults, nTeams).map((c, i) => `${TEAMS[i]}:${c}`).join(' ');
 		},
 	},
 
 	/**
 	 * 100 if any team plays another with max-min > 1, else 0
+	 * Allows unevenness of at most ±1 (e.g., partial final round)
 	 */
 	unevenMatchups: {
 		score(weekResults, nTeams, path) {
@@ -540,6 +515,7 @@ const overallPainFunctions = {
 			}
 			return 0;
 		},
+		perTeam() { return []; },
 		explain(weekResults, nTeams, path) {
 			// Build matchup count matrix
 			const counts = Array.from({ length: nTeams }, () => new Array(nTeams).fill(0));
@@ -566,57 +542,152 @@ const overallPainFunctions = {
 	},
 };
 
+function formatNum(v) {
+	return Number.isInteger(v) ? String(v) : v.toFixed(1);
+}
+
+/**
+ * Calculate the unified unfairness score: sum of (weight × stdev) per metric.
+ * This measures per-metric fairness independently, preventing unfairness in one
+ * dimension from being masked by compensation in another.
+ * Returns { perTeamPain, perMetricPerTeam, score }
+ */
+function calculateUnfairness(weekResults, nTeams) {
+	const perTeamPain = new Array(nTeams).fill(0);
+	const perMetricPerTeam = {};
+	let score = 0;
+	for (const [metric, config] of Object.entries(painConfig)) {
+		if (config.unfairness > 0) {
+			const perTeam = basePainFunctions[metric].perTeam(weekResults, nTeams);
+			perMetricPerTeam[metric] = { perTeam, weight: config.unfairness };
+			score += config.unfairness * stddev(perTeam);
+			for (let ti = 0; ti < nTeams; ti++) {
+				perTeamPain[ti] += perTeam[ti] * config.unfairness;
+			}
+		}
+	}
+	return { perTeamPain, perMetricPerTeam, score };
+}
+
 // ============================================================================
 // Score Calculation
 // ============================================================================
 
 function calculateOverallScore(weekResults, path) {
 	let totalScore = 0;
-	for (const [painName, multiplier] of Object.entries(overallPainMultipliers)) {
-		if (multiplier > 0) {
-			const painFn = overallPainFunctions[painName];
+	for (const [painName, config] of Object.entries(painConfig)) {
+		if (config.overall > 0) {
+			const painFn = basePainFunctions[painName];
+			const start = performance.now();
 			const score = painFn.score(weekResults, N_TEAMS, path);
-			totalScore += score * multiplier;
+			const elapsed = performance.now() - start;
+			const timing = painTiming.get(painName) ?? { totalMs: 0, calls: 0 };
+			timing.totalMs += elapsed;
+			timing.calls += 1;
+			painTiming.set(painName, timing);
+			totalScore += score * config.overall;
 		}
+	}
+	if (unfairnessOverallWeight > 0) {
+		const start = performance.now();
+		const { score: unfairScore } = calculateUnfairness(weekResults, N_TEAMS);
+		totalScore += unfairScore * unfairnessOverallWeight;
+		const elapsed = performance.now() - start;
+		const timing = painTiming.get('unfairPainPerTeam') ?? { totalMs: 0, calls: 0 };
+		timing.totalMs += elapsed;
+		timing.calls += 1;
+		painTiming.set('unfairPainPerTeam', timing);
 	}
 	return totalScore;
 }
 
 function explainScore(weekResults, path) {
-	const metrics = [];
+	const lines = [];
 	let totalScore = 0;
 
-	// Find the longest metric name for alignment
-	const maxNameLen = Math.max(...Object.keys(overallPainMultipliers).map(n => n.length));
-
-	for (const [painName, multiplier] of Object.entries(overallPainMultipliers)) {
-		const painFn = overallPainFunctions[painName];
+	// Compute all values first
+	const metricData = [];
+	for (const [painName, config] of Object.entries(painConfig)) {
+		const painFn = basePainFunctions[painName];
 		const rawScore = painFn.score(weekResults, N_TEAMS, path);
-		const weighted = rawScore * multiplier;
-		totalScore += weighted;
+		const weighted = rawScore * config.overall;
 		const teamDetails = painFn.explain(weekResults, N_TEAMS, path);
-		const paddedName = painName.padEnd(maxNameLen);
-		metrics.push({
-			name: paddedName,
-			weighted,
-			rawScore,
-			multiplier,
-			teamDetails
-		});
+		metricData.push({ name: painName, weighted, rawScore, weight: config.overall, teamDetails });
+		totalScore += weighted;
 	}
 
-	const formatMetric = (m) => {
-		return `${m.name}: ${m.weighted.toFixed(2).padStart(5)} (${m.multiplier} * ${m.rawScore.toFixed(1)}) ${m.teamDetails}`;
+	const { perTeamPain, perMetricPerTeam, score: unfairScore } = calculateUnfairness(weekResults, N_TEAMS);
+	const unfairWeighted = unfairScore * unfairnessOverallWeight;
+	totalScore += unfairWeighted;
+
+	// Compute alignment widths for main metric lines
+	const allNames = [...metricData.map(d => d.name), 'unfairPainPerTeam'];
+	const maxNameLen = Math.max(...allNames.map(n => n.length));
+
+	const allWeights = [...metricData.map(d => d.weight), unfairnessOverallWeight];
+	const maxWeightWidth = Math.max(...allWeights.map(w => w.toFixed(2).length));
+
+	const allRawScores = [...metricData.map(d => d.rawScore), unfairScore];
+	const maxRawWidth = Math.max(...allRawScores.map(s => s.toFixed(1).length));
+
+	const allWeightedScores = [...metricData.map(d => d.weighted), unfairWeighted];
+	const maxWeightedWidth = Math.max(...allWeightedScores.map(w => w.toFixed(2).length));
+
+	// Format main metric lines
+	for (const { name, weighted, rawScore, weight, teamDetails } of metricData) {
+		const paddedName = name.padEnd(maxNameLen);
+		const weightedStr = weighted.toFixed(2).padStart(maxWeightedWidth);
+		const weightStr = weight.toFixed(2).padStart(maxWeightWidth);
+		const rawStr = rawScore.toFixed(1).padStart(maxRawWidth);
+		lines.push(`${paddedName} : ${weightedStr} (${weightStr} × ${rawStr}) ${teamDetails}`);
+	}
+
+	// Format unfairPainPerTeam line
+	const teamTotals = perTeamPain.map((v, i) => `${TEAMS[i]}:${formatNum(v)}`).join(' ');
+	const paddedUnfairName = 'unfairPainPerTeam'.padEnd(maxNameLen);
+	const unfairWeightedStr = unfairWeighted.toFixed(2).padStart(maxWeightedWidth);
+	const unfairWeightStr = unfairnessOverallWeight.toFixed(2).padStart(maxWeightWidth);
+	const unfairRawStr = unfairScore.toFixed(1).padStart(maxRawWidth);
+	lines.push(`${paddedUnfairName} : ${unfairWeightedStr} (${unfairWeightStr} × ${unfairRawStr}) ${teamTotals}`);
+
+	// Sub-lines: show unfairness weight × per-metric stdev (informational)
+	const subNameMap = {
+		doubleHeaderPain: 'doubleHeaders',
+		doubleByePain: 'doubleByes',
+		totalSlotsPain: 'totalSlots',
+		earlyWeeks: 'earlyWeeks',
+		lateWeeks: 'lateWeeks',
+		thirdVs2nd: 'thirdVs2nd',
 	};
+
+	const subEntries = Object.entries(perMetricPerTeam);
+	const maxSubNameLen = Math.max(...subEntries.map(([m]) => (subNameMap[m] || m).length));
+
+	const subData = subEntries.map(([metric, { perTeam, weight }]) => {
+		const metricStdev = stddev(perTeam);
+		const subWeighted = weight * metricStdev;
+		return { metric, weight, metricStdev, subWeighted };
+	});
+
+	const maxSubWeightedWidth = Math.max(...subData.map(d => d.subWeighted.toFixed(2).length));
+	const maxSubWeightWidth = Math.max(...subData.map(d => d.weight.toFixed(2).length));
+	const maxSubStdevWidth = Math.max(...subData.map(d => d.metricStdev.toFixed(2).length));
+
+	for (const { metric, weight, metricStdev, subWeighted } of subData) {
+		const subName = (subNameMap[metric] || metric).padEnd(maxSubNameLen);
+		const subWeightedStr = subWeighted.toFixed(2).padStart(maxSubWeightedWidth);
+		const subWeightStr = weight.toFixed(2).padStart(maxSubWeightWidth);
+		const subStdevStr = metricStdev.toFixed(2).padStart(maxSubStdevWidth);
+		lines.push(`    ${subName} : ${subWeightedStr} (${subWeightStr} × ${subStdevStr})`);
+	}
 
 	return {
 		totalScore,
-		metrics,
 		toString() {
-			return `Total Score: ${totalScore.toFixed(4)}\n${metrics.map(formatMetric).join('\n')}`;
+			return `Total Score: ${totalScore.toFixed(4)}\n${lines.join('\n')}`;
 		},
 		toFileString() {
-			return `# Total Score: ${totalScore.toFixed(4)}\n${metrics.map(formatMetric).join('\n')}`;
+			return `# Total Score: ${totalScore.toFixed(4)}\n${lines.join('\n')}`;
 		}
 	};
 }
@@ -701,7 +772,7 @@ async function main() {
 
 	console.log(`Evaluating schedules from: ${inputPath}`);
 	console.log(`Teams: ${N_TEAMS}, Weeks: ${N_WEEKS}, Slots per week: ${N_SLOTS}`);
-	console.log(`Pain multipliers:`, overallPainMultipliers);
+	console.log(`Pain config:`, painConfig, `Unfairness overall weight:`, unfairnessOverallWeight);
 	console.log();
 	console.log(`File header: teams=${header.teams} weeks=${header.weeks} count=${header.count}`);
 	console.log();
@@ -741,7 +812,7 @@ async function main() {
 			bestSchedules = [{ path, weekResults, scheduleNum: evaluated }];
 
 			const explained = explainScore(weekResults, path);
-			console.log(`Schedule ${evaluated}/${header.count} :: Score: ${explained.totalScore.toFixed(4)}`);
+			console.log(`Schedule ${evaluated}/${header.count} :: Score: ${explained.totalScore.toFixed(2)}`);
 			console.log(formatSchedule(path));
 			console.log(explained.toString().split('\n').slice(1).join('\n'));
 			console.log('Team Matchups:');
@@ -752,7 +823,7 @@ async function main() {
 			bestSchedules.push({ path, weekResults, scheduleNum: evaluated });
 
 			const explained = explainScore(weekResults, path);
-			console.log(`Schedule ${evaluated}/${header.count} :: Score: ${explained.totalScore.toFixed(4)}`);
+			console.log(`Schedule ${evaluated}/${header.count} :: Score: ${explained.totalScore.toFixed(2)}`);
 			console.log(formatSchedule(path));
 			console.log(explained.toString().split('\n').slice(1).join('\n'));
 			console.log('Team Matchups:');
@@ -767,16 +838,39 @@ async function main() {
 	console.log(`Week schedules cached: ${weekMetricCache.size}`);
 	console.log(`Best score: ${bestScore.toFixed(4)}`);
 	console.log(`Schedules with best score: ${bestSchedules.length}`);
+	if (painTiming.size > 0) {
+		console.log('\nPain metric timings (overall score only):');
+		const rows = [];
+		for (const [painName, timing] of painTiming.entries()) {
+			const avgMs = timing.calls > 0 ? timing.totalMs / timing.calls : 0;
+			rows.push({
+				name: painName,
+				totalMs: timing.totalMs,
+				avgMs,
+				calls: timing.calls
+			});
+		}
+		rows.sort((a, b) => b.totalMs - a.totalMs);
+		const namePad = Math.max(...rows.map(r => r.name.length));
+		for (const row of rows) {
+			const name = row.name.padEnd(namePad);
+			const total = row.totalMs.toFixed(2).padStart(9);
+			const avg = row.avgMs.toFixed(4).padStart(9);
+			const calls = String(row.calls).padStart(8);
+			console.log(`${name} : total ${total} ms | avg ${avg} ms | calls ${calls}`);
+		}
+	}
 
 	// Write results to file
 	const outputLines = [];
 	outputLines.push(`# teams=${N_TEAMS} weeks=${N_WEEKS} count=${bestSchedules.length}`);
-	outputLines.push(`# Pain multipliers: ${JSON.stringify(overallPainMultipliers)}`);
+	outputLines.push(`# Pain config: ${JSON.stringify(painConfig)}`);
+	outputLines.push(`# Unfairness overall weight: ${unfairnessOverallWeight}`);
 	outputLines.push('');
 
 	for (const { path, weekResults, scheduleNum } of bestSchedules) {
 		const explained = explainScore(weekResults, path);
-		outputLines.push(`Schedule ${scheduleNum}/${evaluated} :: Score: ${explained.totalScore.toFixed(4)}`);
+		outputLines.push(`Schedule ${scheduleNum}/${evaluated} :: Score: ${explained.totalScore.toFixed(2)}`);
 		outputLines.push(formatSchedule(path));
 		outputLines.push(explained.toString().split('\n').slice(1).join('\n'));
 		outputLines.push('Team Matchups:');
