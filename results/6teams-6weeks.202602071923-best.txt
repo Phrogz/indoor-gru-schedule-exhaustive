@@ -1,0 +1,148 @@
+# teams=6 weeks=6 count=5
+# Pain config: {"doubleHeaderPain":{"overall":0.4,"unfairness":1},"doubleByePain":{"overall":0.2,"unfairness":2},"totalSlotsPain":{"overall":0.05,"unfairness":2},"earlyWeeks":{"overall":0.01,"unfairness":1},"lateWeeks":{"overall":0.01,"unfairness":1},"thirdVs2nd":{"overall":0.05,"unfairness":5}}
+# Unfairness overall weight: 1
+
+Schedule 6557439/25671240 :: Score: 22.21
+Week 1: AvB AvE BvE AvC BvD EvF CvD CvF DvF
+Week 2: DvE AvD AvE BvD CvE AvF BvC BvF CvF
+Week 3: BvE BvF EvF AvB CvE DvF AvC AvD CvD
+Week 4: AvB AvC BvC AvF BvD CvE DvF EvF DvE
+Week 5: CvF BvC BvF CvD AvF BvE AvD DvE AvE
+Week 6: CvF CvD DvF CvE AvF BvD AvE BvE AvB
+doubleHeaderPain  : 9.60 (0.40 ×  24.0) A:4 B:4 C:4 D:4 E:4 F:4
+doubleByePain     : 2.40 (0.20 ×  12.0) A:2 B:2 C:2 D:2 E:2 F:2
+totalSlotsPain    : 8.40 (0.05 × 168.0) A:28 B:28 C:28 D:28 E:28 F:28
+earlyWeeks        : 0.18 (0.01 ×  18.0) A:3 B:4 C:3 D:2 E:3 F:3
+lateWeeks         : 0.18 (0.01 ×  18.0) A:3 B:2 C:3 D:4 E:3 F:3
+thirdVs2nd        : 0.30 (0.05 ×   6.0) A:1 B:1 C:1 D:1 E:1 F:1
+unfairPainPerTeam : 1.15 (1.00 ×   1.2) A:75 B:75 C:75 D:75 E:75 F:75
+    doubleHeaders : 0.00 (1.00 × 0.00)
+    doubleByes    : 0.00 (2.00 × 0.00)
+    totalSlots    : 0.00 (2.00 × 0.00)
+    earlyWeeks    : 0.58 (1.00 × 0.58)
+    lateWeeks     : 0.58 (1.00 × 0.58)
+    thirdVs2nd    : 0.00 (5.00 × 0.00)
+Team Matchups:
+  A B C D E F
+A · 4 3 3 4 4
+B 4 · 3 4 4 3
+C 3 3 · 4 4 4
+D 3 4 4 · 3 4
+E 4 4 4 3 · 3
+F 4 3 4 4 3 ·
+
+Schedule 6637454/25671240 :: Score: 22.21
+Week 1: AvB AvE BvE AvC BvD EvF CvD CvF DvF
+Week 2: AvD DvF AvF DvE AvC BvF CvE BvE BvC
+Week 3: CvE CvD DvE CvF AvE BvD AvF BvF AvB
+Week 4: AvB AvC BvC AvD BvF CvE DvF DvE EvF
+Week 5: EvF AvE AvF BvE CvF AvD BvC BvD CvD
+Week 6: DvF BvF BvD AvF DvE BvC AvE AvC CvE
+doubleHeaderPain  : 9.60 (0.40 ×  24.0) A:4 B:4 C:4 D:4 E:4 F:4
+doubleByePain     : 2.40 (0.20 ×  12.0) A:2 B:2 C:2 D:2 E:2 F:2
+totalSlotsPain    : 8.40 (0.05 × 168.0) A:28 B:28 C:28 D:28 E:28 F:28
+earlyWeeks        : 0.18 (0.01 ×  18.0) A:4 B:3 C:2 D:3 E:3 F:3
+lateWeeks         : 0.18 (0.01 ×  18.0) A:2 B:3 C:4 D:3 E:3 F:3
+thirdVs2nd        : 0.30 (0.05 ×   6.0) A:1 B:1 C:1 D:1 E:1 F:1
+unfairPainPerTeam : 1.15 (1.00 ×   1.2) A:75 B:75 C:75 D:75 E:75 F:75
+    doubleHeaders : 0.00 (1.00 × 0.00)
+    doubleByes    : 0.00 (2.00 × 0.00)
+    totalSlots    : 0.00 (2.00 × 0.00)
+    earlyWeeks    : 0.58 (1.00 × 0.58)
+    lateWeeks     : 0.58 (1.00 × 0.58)
+    thirdVs2nd    : 0.00 (5.00 × 0.00)
+Team Matchups:
+  A B C D E F
+A · 3 4 3 4 4
+B 3 · 4 4 3 4
+C 4 4 · 3 4 3
+D 3 4 3 · 4 4
+E 4 3 4 4 · 3
+F 4 4 3 4 3 ·
+
+Schedule 15063338/25671240 :: Score: 22.21
+Week 1: AvB BvC AvC BvF AvD CvE DvF EvF DvE
+Week 2: CvF DvF CvD AvF CvE BvD AvE AvB BvE
+Week 3: BvE EvF BvF DvE BvC AvF CvD AvD AvC
+Week 4: AvB AvE BvE AvC BvD EvF CvD CvF DvF
+Week 5: CvF BvC BvF CvE AvF BvD AvE DvE AvD
+Week 6: DvE AvD AvE BvD EvF AvC BvF BvC CvF
+doubleHeaderPain  : 9.60 (0.40 ×  24.0) A:4 B:4 C:4 D:4 E:4 F:4
+doubleByePain     : 2.40 (0.20 ×  12.0) A:2 B:2 C:2 D:2 E:2 F:2
+totalSlotsPain    : 8.40 (0.05 × 168.0) A:28 B:28 C:28 D:28 E:28 F:28
+earlyWeeks        : 0.18 (0.01 ×  18.0) A:3 B:4 C:3 D:2 E:3 F:3
+lateWeeks         : 0.18 (0.01 ×  18.0) A:3 B:2 C:3 D:4 E:3 F:3
+thirdVs2nd        : 0.30 (0.05 ×   6.0) A:1 B:1 C:1 D:1 E:1 F:1
+unfairPainPerTeam : 1.15 (1.00 ×   1.2) A:75 B:75 C:75 D:75 E:75 F:75
+    doubleHeaders : 0.00 (1.00 × 0.00)
+    doubleByes    : 0.00 (2.00 × 0.00)
+    totalSlots    : 0.00 (2.00 × 0.00)
+    earlyWeeks    : 0.58 (1.00 × 0.58)
+    lateWeeks     : 0.58 (1.00 × 0.58)
+    thirdVs2nd    : 0.00 (5.00 × 0.00)
+Team Matchups:
+  A B C D E F
+A · 3 4 4 4 3
+B 3 · 4 4 3 4
+C 4 4 · 3 3 4
+D 4 4 3 · 4 3
+E 4 3 3 4 · 4
+F 3 4 4 3 4 ·
+
+Schedule 20526992/25671240 :: Score: 22.21
+Week 1: AvB BvE AvE BvD AvC EvF CvD DvF CvF
+Week 2: DvF AvF AvD BvF DvE AvC BvE BvC CvE
+Week 3: CvE EvF CvF AvE CvD BvF AvD AvB BvD
+Week 4: AvB AvC BvC AvF BvE CvD EvF DvF DvE
+Week 5: CvF BvC BvF CvE AvF BvD AvE DvE AvD
+Week 6: BvE DvE BvD CvE BvF AvD CvF AvC AvF
+doubleHeaderPain  : 9.60 (0.40 ×  24.0) A:4 B:4 C:4 D:4 E:4 F:4
+doubleByePain     : 2.40 (0.20 ×  12.0) A:2 B:2 C:2 D:2 E:2 F:2
+totalSlotsPain    : 8.40 (0.05 × 168.0) A:28 B:28 C:28 D:28 E:28 F:28
+earlyWeeks        : 0.18 (0.01 ×  18.0) A:3 B:4 C:3 D:2 E:3 F:3
+lateWeeks         : 0.18 (0.01 ×  18.0) A:3 B:2 C:3 D:4 E:3 F:3
+thirdVs2nd        : 0.30 (0.05 ×   6.0) A:1 B:1 C:1 D:1 E:1 F:1
+unfairPainPerTeam : 1.15 (1.00 ×   1.2) A:75 B:75 C:75 D:75 E:75 F:75
+    doubleHeaders : 0.00 (1.00 × 0.00)
+    doubleByes    : 0.00 (2.00 × 0.00)
+    totalSlots    : 0.00 (2.00 × 0.00)
+    earlyWeeks    : 0.58 (1.00 × 0.58)
+    lateWeeks     : 0.58 (1.00 × 0.58)
+    thirdVs2nd    : 0.00 (5.00 × 0.00)
+Team Matchups:
+  A B C D E F
+A · 3 4 4 3 4
+B 3 · 3 4 4 4
+C 4 3 · 3 4 4
+D 4 4 3 · 4 3
+E 3 4 4 4 · 3
+F 4 4 4 3 3 ·
+
+Schedule 22728803/25671240 :: Score: 22.21
+Week 1: AvB BvF AvF BvC AvD EvF CvD CvE DvE
+Week 2: DvF CvD CvF BvD EvF AvC BvE AvB AvE
+Week 3: CvF AvF AvC DvF BvC AvE BvD DvE BvE
+Week 4: AvB AvD BvD AvE BvF CvD EvF CvE CvF
+Week 5: CvE BvC BvE AvC DvE BvF AvD AvF DvF
+Week 6: CvD DvE CvE DvF AvC BvE AvF BvF AvB
+doubleHeaderPain  : 9.60 (0.40 ×  24.0) A:4 B:4 C:4 D:4 E:4 F:4
+doubleByePain     : 2.40 (0.20 ×  12.0) A:2 B:2 C:2 D:2 E:2 F:2
+totalSlotsPain    : 8.40 (0.05 × 168.0) A:28 B:28 C:28 D:28 E:28 F:28
+earlyWeeks        : 0.18 (0.01 ×  18.0) A:3 B:3 C:4 D:3 E:2 F:3
+lateWeeks         : 0.18 (0.01 ×  18.0) A:3 B:3 C:2 D:3 E:4 F:3
+thirdVs2nd        : 0.30 (0.05 ×   6.0) A:1 B:1 C:1 D:1 E:1 F:1
+unfairPainPerTeam : 1.15 (1.00 ×   1.2) A:75 B:75 C:75 D:75 E:75 F:75
+    doubleHeaders : 0.00 (1.00 × 0.00)
+    doubleByes    : 0.00 (2.00 × 0.00)
+    totalSlots    : 0.00 (2.00 × 0.00)
+    earlyWeeks    : 0.58 (1.00 × 0.58)
+    lateWeeks     : 0.58 (1.00 × 0.58)
+    thirdVs2nd    : 0.00 (5.00 × 0.00)
+Team Matchups:
+  A B C D E F
+A · 4 4 3 3 4
+B 4 · 3 3 4 4
+C 4 3 · 4 4 3
+D 3 3 4 · 4 4
+E 3 4 4 4 · 3
+F 4 4 3 4 3 ·
