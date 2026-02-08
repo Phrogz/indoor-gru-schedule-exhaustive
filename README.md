@@ -17,6 +17,9 @@ those constraints, finding schedules with better scores (fewer double-byes and
 # Generate schedules for N teams over M weeks
 node calculate.mjs --teams=8 --weeks=3
 
+# Use the 16GB heap script (recommended for large runs)
+npm run calculate -- --teams=6 --weeks=6 --workers=7
+
 # View saved results
 node display.mjs results/8teams-3weeks.txt --limit=5
 ```

@@ -60,6 +60,10 @@ When a week straddles two rounds, games from round N+1 may appear in ANY slot—
 - Week 3: 6 games complete round 1, 3 games start round 2 (interleaved in any order)
 - Week 4: 9 games toward round 2
 
+### Uneven Matchups Metric
+
+The `unevenMatchups` metric in `evaluate.mjs` does **not** require exact round completion. It only flags schedules where any team has a matchup count spread greater than ±1 against opponents (i.e., `max - min > 1`). This allows a partial final round to be off by at most one.
+
 ### Output Formats
 
 All results use **streaming text format** (`.txt`) for memory efficiency:

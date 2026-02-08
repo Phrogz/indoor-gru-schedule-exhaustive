@@ -1191,12 +1191,12 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     startingWeeks = sourceWeeks;
     priorFile = resumeData.file;  // Will reload complete paths from this in runWorkers
 
-    // Store resume info for worker distribution - pass small skip sets, not huge path arrays
+    // Store resume info for worker distribution - keep sets in memory for filtering
     resumeData.sourceFile = sourceFile;
     resumeData.totalSourcePaths = totalSourcePaths;
-    // Convert completedPrefixes Set to Array for passing to workers
-    resumeData.completedKeys = Array.from(resumeData.completedPrefixes);
-    resumeData.incompleteKeys = Array.from(incompleteKeys);
+    resumeData.unprocessedCount = unprocessedCount;
+    resumeData.completedKeys = resumeData.completedPrefixes;
+    resumeData.incompleteKeys = incompleteKeys;
   } else if (bestPrior && bestPrior.weeks > 1) {
     priorFile = bestPrior.file;
     startingWeeks = bestPrior.weeks;
@@ -1274,7 +1274,11 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
   let optimalCount = 0;
   let optimalWriter = null;  // TreeWriter instance, created on first optimal result
   let lastWrittenPath = null; // For prefix compression in streaming writes
-  const existingPathHashes = new Set();  // For deduplication during resume - use hashes instead of full keys
+  const EXISTING_HASH_SHARDS = 32;
+  const existingPathHashes = Array.from(
+    { length: EXISTING_HASH_SHARDS },
+    () => new Set(),
+  );  // For deduplication during resume - use hashes instead of full keys
   const saveFile = `results/${N_TEAMS}teams-${N_WEEKS}week${N_WEEKS > 1 ? 's' : ''}.txt`;
 
   // Hash a path to BigInt for deduplication (64-bit to minimize collisions at scale)
@@ -1290,6 +1294,10 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
       }
     }
     return (h1 << 32n) | h2;
+  }
+
+  function hashShard(hash) {
+    return Number(hash & BigInt(EXISTING_HASH_SHARDS - 1));
   }
 
   // Helper: compare two schedule arrays element-by-element
@@ -1419,6 +1427,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     let sourceFile = null;      // File to stream from (null = use in-memory paths)
     let inMemoryPaths = null;   // In-memory paths (for small datasets or resume incomplete)
     let totalInputPaths = 0;
+    let resumeFilter = null;    // { completedKeys, incompleteKeys } for resume streaming
 
     if (resumeData && priorFile && existsSync(priorFile)) {
       // Resume mode: copy existing results, then load ALL source paths
@@ -1430,7 +1439,8 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
       const BATCH_SIZE = 10000;
 
       for await (const path of reader.paths()) {
-        existingPathHashes.add(hashPath(path));
+        const pathHash = hashPath(path);
+        existingPathHashes[hashShard(pathHash)].add(pathHash);
         batchPaths.push(path);
         existingCount++;
         if (batchPaths.length >= BATCH_SIZE) {
@@ -1444,41 +1454,24 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
       console.log(`  Copied ${existingCount} existing paths`);
 
       // Build sets for quick lookup
-      const completedKeys = new Set(resumeData.completedKeys || []);
-      const incompleteKeys = new Set(resumeData.incompleteKeys || []);
+      const completedKeys = resumeData.completedKeys || new Set();
+      const incompleteKeys = resumeData.incompleteKeys || new Set();
 
-      // Load ALL source paths, filtering and marking appropriately
-      console.log(`  Loading source paths from ${resumeData.sourceFile}...`);
-      const sourceReader = new TreeReader(resumeData.sourceFile);
+      // Resume incomplete prefixes in-memory (small), stream all others from file
+      inMemoryPaths = resumeData.incompletePrefixes && resumeData.incompletePrefixes.length > 0
+        ? resumeData.incompletePrefixes
+        : null;
+      sourceFile = resumeData.sourceFile;
+      resumeFilter = { completedKeys, incompleteKeys };
 
-      inMemoryPaths = [];
-      let skippedComplete = 0;
-      let resumeIncomplete = 0;
-      let addedUnprocessed = 0;
+      const skippedComplete = completedKeys.size;
+      const resumeIncomplete = incompleteKeys.size;
+      const addedUnprocessed = resumeData.unprocessedCount || 0;
 
-      for await (const path of sourceReader.paths()) {
-        // Build key in same format as findIncompleteBranches uses
-        const key = path.map(s => s.join(',')).join('|');
-
-        if (completedKeys.has(key)) {
-          // This path was fully explored - skip it
-          skippedComplete++;
-          continue;
-        }
-
-        if (incompleteKeys.has(key)) {
-          // This path was partially explored - add it (will resume with skip offset)
-          resumeIncomplete++;
-        } else {
-          // This path was never started - add it fresh
-          addedUnprocessed++;
-        }
-
-        inMemoryPaths.push(path);
-      }
-
+      console.log(`  Streaming source paths from ${resumeData.sourceFile}...`);
       console.log(`  Source: ${skippedComplete} complete (skip), ${resumeIncomplete} incomplete (resume), ${addedUnprocessed} unprocessed (new)`);
-      totalInputPaths = inMemoryPaths.length;
+
+      totalInputPaths = (inMemoryPaths ? inMemoryPaths.length : 0) + addedUnprocessed;
     } else if (priorFile && existsSync(priorFile) && !VALIDATE) {
       // Build tree index for diverse iteration (multi-level mod)
       sourceFile = priorFile;
@@ -1690,9 +1683,10 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
       const roundPct = pathsToProcess > 0 ? ((pathsProcessedThisRound / pathsToProcess) * 100).toFixed(1) : '100.0';
       progressStr += ` | round ${currentRound + 1} (${roundPct}% done)`;
 
-      // Add discarded count
+      // Add discarded count (can be temporarily negative due to message ordering:
+      // optimalCount updates on 'optimal' messages, totalSchedulesChecked on 'result')
       const discarded = totalSchedulesChecked - optimalCount;
-      if (totalSchedulesChecked > 0) {
+      if (totalSchedulesChecked > 0 && discarded >= 0) {
         progressStr += ` | ${discarded.toLocaleString()} discarded`;
       }
 
@@ -1758,10 +1752,11 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
 
               // Always deduplicate - async race conditions can cause duplicates
               const pathHash = hashPath(fullPath);
-              if (existingPathHashes.has(pathHash)) {
+              const shard = hashShard(pathHash);
+              if (existingPathHashes[shard].has(pathHash)) {
                 continue;
               }
-              existingPathHashes.add(pathHash);
+              existingPathHashes[shard].add(pathHash);
 
               pathsToWrite.push(fullPath);
             }
