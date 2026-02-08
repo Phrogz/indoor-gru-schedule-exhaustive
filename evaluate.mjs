@@ -569,11 +569,37 @@ function calculateUnfairness(weekResults, nTeams) {
 	return { perTeamPain, perMetricPerTeam, score };
 }
 
+const UNFAIRNESS_METRIC_SPECS = [
+	{ name: 'doubleHeaderPain', weekField: 'doubleHeaderCountByTeam' },
+	{ name: 'doubleByePain', weekField: 'doubleByeCountByTeam' },
+	{ name: 'totalSlotsPain', weekField: 'weekSlotSpanByTeam' },
+	{ name: 'earlyWeeks', weekField: 'earlyWeeksByTeam' },
+	{ name: 'lateWeeks', weekField: 'lateWeeksByTeam' },
+	{ name: 'thirdVs2nd', weekField: 'game3rdVs2ndByTeam' },
+];
+
+function calculateUnfairnessFromTotals(perMetricTotals, nTeams) {
+	const perTeamPain = new Array(nTeams).fill(0);
+	const perMetricPerTeam = {};
+	let score = 0;
+	for (const { name } of UNFAIRNESS_METRIC_SPECS) {
+		const weight = painConfig[name]?.unfairness ?? 0;
+		if (weight <= 0) continue;
+		const perTeam = perMetricTotals[name];
+		perMetricPerTeam[name] = { perTeam, weight };
+		score += weight * stddev(perTeam);
+		for (let ti = 0; ti < nTeams; ti++) {
+			perTeamPain[ti] += perTeam[ti] * weight;
+		}
+	}
+	return { perTeamPain, perMetricPerTeam, score };
+}
+
 // ============================================================================
 // Score Calculation
 // ============================================================================
 
-function calculateOverallScore(weekResults, path) {
+function calculateOverallScore(weekResults, path, precomputedUnfairnessScore = null) {
 	let totalScore = 0;
 	for (const [painName, config] of Object.entries(painConfig)) {
 		if (config.overall > 0) {
@@ -590,7 +616,7 @@ function calculateOverallScore(weekResults, path) {
 	}
 	if (unfairnessOverallWeight > 0) {
 		const start = performance.now();
-		const { score: unfairScore } = calculateUnfairness(weekResults, N_TEAMS);
+		const unfairScore = precomputedUnfairnessScore ?? calculateUnfairness(weekResults, N_TEAMS).score;
 		totalScore += unfairScore * unfairnessOverallWeight;
 		const elapsed = performance.now() - start;
 		const timing = painTiming.get('unfairPainPerTeam') ?? { totalMs: 0, calls: 0 };
@@ -601,7 +627,7 @@ function calculateOverallScore(weekResults, path) {
 	return totalScore;
 }
 
-function explainScore(weekResults, path) {
+function explainScore(weekResults, path, precomputedUnfairness = null) {
 	const lines = [];
 	let totalScore = 0;
 
@@ -616,7 +642,9 @@ function explainScore(weekResults, path) {
 		totalScore += weighted;
 	}
 
-	const { perTeamPain, perMetricPerTeam, score: unfairScore } = calculateUnfairness(weekResults, N_TEAMS);
+	const { perTeamPain, perMetricPerTeam, score: unfairScore } = precomputedUnfairness
+		? precomputedUnfairness
+		: calculateUnfairness(weekResults, N_TEAMS);
 	const unfairWeighted = unfairScore * unfairnessOverallWeight;
 	totalScore += unfairWeighted;
 
@@ -768,7 +796,9 @@ async function main() {
 	// Initialize constants based on resolved values
 	initConstants(teams, weeks);
 
-	const outputPath = `results/${N_TEAMS}teams-${N_WEEKS}weeks-best.txt`;
+	const outputPath = CLI_ARGS.inputFile
+		? CLI_ARGS.inputFile.replace(/\.txt$/, '-best.txt')
+		: `results/${N_TEAMS}teams-${N_WEEKS}weeks-best.txt`;
 
 	console.log(`Evaluating schedules from: ${inputPath}`);
 	console.log(`Teams: ${N_TEAMS}, Weeks: ${N_WEEKS}, Slots per week: ${N_SLOTS}`);
@@ -782,6 +812,37 @@ async function main() {
 	let evaluated = 0;
 
 	let skipped = 0;
+
+	function schedulesEqual(a, b) {
+		if (!a || !b || a.length !== b.length) return false;
+		for (let i = 0; i < a.length; i++) {
+			if (a[i] !== b[i]) return false;
+		}
+		return true;
+	}
+
+	function createMetricTotals(nTeams) {
+		const totals = {};
+		for (const { name } of UNFAIRNESS_METRIC_SPECS) {
+			totals[name] = new Float64Array(nTeams);
+		}
+		return totals;
+	}
+
+	function accumulateTotals(targetTotals, baseTotals, weekMetrics, nTeams) {
+		for (const { name, weekField } of UNFAIRNESS_METRIC_SPECS) {
+			const target = targetTotals[name];
+			const base = baseTotals ? baseTotals[name] : null;
+			const counts = weekMetrics[weekField];
+			for (let ti = 0; ti < nTeams; ti++) {
+				target[ti] = (base ? base[ti] : 0) + counts[ti];
+			}
+		}
+	}
+
+	let previousPath = null;
+	const totalsByDepth = new Array(N_WEEKS).fill(null);
+
 	for await (const path of reader.paths()) {
 		evaluated++;
 
@@ -803,15 +864,34 @@ async function main() {
 		// Gather week metrics (cached)
 		const weekResults = path.map(week => getWeekMetrics(week));
 
+		// Incremental unfairness totals using shared prefixes
+		let commonDepth = 0;
+		if (previousPath) {
+			while (
+				commonDepth < N_WEEKS &&
+				schedulesEqual(previousPath[commonDepth], path[commonDepth])
+			) {
+				commonDepth++;
+			}
+		}
+
+		for (let depth = commonDepth; depth < N_WEEKS; depth++) {
+			if (!totalsByDepth[depth]) totalsByDepth[depth] = createMetricTotals(N_TEAMS);
+			const baseTotals = depth > 0 ? totalsByDepth[depth - 1] : null;
+			accumulateTotals(totalsByDepth[depth], baseTotals, weekResults[depth], N_TEAMS);
+		}
+
+		const unfairnessData = calculateUnfairnessFromTotals(totalsByDepth[N_WEEKS - 1], N_TEAMS);
+
 		// Calculate overall score
-		const score = calculateOverallScore(weekResults, path);
+		const score = calculateOverallScore(weekResults, path, unfairnessData.score);
 
 		if (score < bestScore) {
 			// New best - reset list
 			bestScore = score;
 			bestSchedules = [{ path, weekResults, scheduleNum: evaluated }];
 
-			const explained = explainScore(weekResults, path);
+			const explained = explainScore(weekResults, path, unfairnessData);
 			console.log(`Schedule ${evaluated}/${header.count} :: Score: ${explained.totalScore.toFixed(2)}`);
 			console.log(formatSchedule(path));
 			console.log(explained.toString().split('\n').slice(1).join('\n'));
@@ -822,7 +902,7 @@ async function main() {
 			// Equal to best - add to list
 			bestSchedules.push({ path, weekResults, scheduleNum: evaluated });
 
-			const explained = explainScore(weekResults, path);
+			const explained = explainScore(weekResults, path, unfairnessData);
 			console.log(`Schedule ${evaluated}/${header.count} :: Score: ${explained.totalScore.toFixed(2)}`);
 			console.log(formatSchedule(path));
 			console.log(explained.toString().split('\n').slice(1).join('\n'));
@@ -830,6 +910,8 @@ async function main() {
 			console.log(formatTeamMatchupsGrid(path));
 			console.log();
 		}
+
+		previousPath = path;
 	}
 
 	console.log(`\n${'='.repeat(60)}`);
