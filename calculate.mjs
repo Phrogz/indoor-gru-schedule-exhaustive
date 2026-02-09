@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync, openSync, readSync, closeSync, copyFileSync } from 'fs';
 import { createReadStream } from 'fs';
 import { createInterface } from 'readline';
-import { TreeWriter, TreeReader, parseHeader, readHeaderFromFile } from './lib/tree-format.mjs';
+import { TreeWriter, TreeReader, isCompleteMarker, isIncompleteMarker, parseHeader, readHeaderFromFile } from './lib/tree-format.mjs';
 
 // ============================================================================
 // Multi-Level Mod Iterator: Diverse path iteration across tree structure
@@ -84,7 +84,8 @@ async function buildTreeIndex(filePath) {
       continue;
     }
 
-    if (line.trim() === '' || line.trim() === '…') {
+    const trimmed = line.trim();
+    if (trimmed === '' || isIncompleteMarker(trimmed) || isCompleteMarker(trimmed)) {
       currentByteOffset += lineBytes;
       continue;
     }
@@ -1086,7 +1087,9 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
 
       // Count leading tabs to determine depth
       const depth = line.match(/^\t*/)[0].length;
-      const schedule = line.trim().split(',').map(Number);
+      const content = line.trim();
+      if (isIncompleteMarker(content) || isCompleteMarker(content)) continue;
+      const schedule = content.split(',').map(Number);
 
       // Truncate path to current depth and add new schedule
       currentPath = currentPath.slice(0, depth);
@@ -1274,7 +1277,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
   let optimalCount = 0;
   let optimalWriter = null;  // TreeWriter instance, created on first optimal result
   let lastWrittenPath = null; // For prefix compression in streaming writes
-  const EXISTING_HASH_SHARDS = 32;
+  const EXISTING_HASH_SHARDS = 256;
   const existingPathHashes = Array.from(
     { length: EXISTING_HASH_SHARDS },
     () => new Set(),
@@ -1311,7 +1314,9 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
   }
 
   function hashShard(hash) {
-    return Number(hash & BigInt(EXISTING_HASH_SHARDS - 1));
+    // Mix high/low bits to avoid shard hotspots from low-bit bias
+    const mixed = hash ^ (hash >> 33n) ^ (hash >> 17n);
+    return Number(mixed & BigInt(EXISTING_HASH_SHARDS - 1));
   }
 
   // Helper: compare two schedule arrays element-by-element
@@ -1532,11 +1537,29 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     let workQueue = Promise.resolve();
 
     async function* createPathIterator() {
+      let index = 0;
       if (inMemoryPaths) {
         for (let i = 0; i < inMemoryPaths.length; i++) {
-          yield { index: i, path: inMemoryPaths[i], diversifyStep: i };
+          yield { index: index++, path: inMemoryPaths[i], diversifyStep: i };
         }
-      } else if (modIterator) {
+      }
+
+      if (resumeFilter && sourceFile) {
+        const reader = new TreeReader(sourceFile);
+        let fileIndex = 0;
+        for await (const path of reader.paths()) {
+          const pathKey = path.map(s => s.join(',')).join('|');
+          if (resumeFilter.completedKeys.has(pathKey) || resumeFilter.incompleteKeys.has(pathKey)) {
+            fileIndex++;
+            continue;
+          }
+          yield { index: index++, path, diversifyStep: fileIndex };
+          fileIndex++;
+        }
+        return;
+      }
+
+      if (modIterator) {
         // Multi-level mod iteration for diverse coverage
         // NOTE: Non-uniform child counts can cause duplicate path generation;
         // we deduplicate here to avoid wasting worker computation
@@ -1565,7 +1588,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
           foundCounts.length = uniqueIndex;
           isComplete.length = uniqueIndex;
         }
-      } else {
+      } else if (sourceFile) {
         // Fallback: sequential file order
         const reader = new TreeReader(sourceFile);
         let idx = 0;
@@ -1573,6 +1596,8 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
           yield { index: idx, path, diversifyStep: idx };
           idx++;
         }
+      } else {
+        return;
       }
     }
 
@@ -1825,6 +1850,29 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
 
               // Track for resume
               incompletePathsMap.set(pathIndex, inputPath);
+            } else if (pathComplete && workerCurrentPath[i] && optimalWriter) {
+              const inputPath = workerCurrentPath[i];
+
+              // Find common prefix with last written path
+              let commonDepth = 0;
+              if (lastWrittenPath) {
+                while (commonDepth < lastWrittenPath.length &&
+                       commonDepth < inputPath.length &&
+                       schedulesEqual(lastWrittenPath[commonDepth], inputPath[commonDepth])) {
+                  commonDepth++;
+                }
+              }
+
+              // Write the input path nodes that differ from last written
+              for (let depth = commonDepth; depth < inputPath.length; depth++) {
+                optimalWriter.writeNode(depth, inputPath[depth]);
+              }
+
+              // Write complete marker at the next depth (where continuations would go)
+              optimalWriter.writeCompleteMarker(inputPath.length);
+
+              lastWrittenPath = inputPath.map(s => Array.from(s));
+              incompletePathsMap.delete(pathIndex);  // Path is now complete
             } else if (pathComplete) {
               incompletePathsMap.delete(pathIndex);  // Path is now complete
             }

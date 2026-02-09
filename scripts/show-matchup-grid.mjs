@@ -7,6 +7,7 @@
 //   node scripts/show-matchup-grid.mjs results/8teams-4weeks.txt 42
 
 import { readFileSync } from 'fs';
+import { isCompleteMarker, isIncompleteMarker } from '../lib/tree-format.mjs';
 
 const TEAMS = 'ABCDEFGHIJKLMNOP';
 
@@ -105,7 +106,7 @@ function parseEvaluatedWeek(line, nTeams) {
 // Parse a week line from tree format: comma-separated indices with optional leading tabs
 function parseTreeWeek(line) {
   const trimmed = line.replace(/^\t+/, '');
-  if (!trimmed || trimmed.startsWith('#') || trimmed === '…') return null;
+  if (!trimmed || trimmed.startsWith('#') || isIncompleteMarker(trimmed) || isCompleteMarker(trimmed)) return null;
   return trimmed.split(',').map(Number);
 }
 
@@ -156,7 +157,8 @@ function loadFromTreeFile(filePath, pathNum, nTeams, nWeeks) {
   let pathCount = 0;
 
   for (const line of lines) {
-    if (line.startsWith('#') || line.trim() === '' || line.trim() === '…') continue;
+    const trimmed = line.trim();
+    if (line.startsWith('#') || trimmed === '' || isIncompleteMarker(trimmed) || isCompleteMarker(trimmed)) continue;
 
     const depth = line.match(/^\t*/)[0].length;
     const week = parseTreeWeek(line);

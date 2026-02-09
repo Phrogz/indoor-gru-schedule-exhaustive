@@ -1,6 +1,7 @@
 // Analyze a single schedule from a results file to understand round-robin
 import { createReadStream } from 'fs';
 import { createInterface } from 'readline';
+import { isCompleteMarker, isIncompleteMarker } from '../lib/tree-format.mjs';
 
 const file = process.argv[2] || 'results/6teams-2weeks.txt';
 
@@ -21,11 +22,12 @@ let stack = [];
 let foundPath = null;
 
 for await (const line of rl) {
-  if (line.startsWith('#') || !line.trim()) continue;
+  const trimmed = line.trim();
+  if (line.startsWith('#') || !trimmed) continue;
   let depth = 0;
   while (line[depth] === '\t') depth++;
   const content = line.slice(depth);
-  if (content === '…') continue;
+  if (isIncompleteMarker(content.trim()) || isCompleteMarker(content.trim())) continue;
   const schedule = content.split(',').map(n => parseInt(n.trim(), 10));
   while (stack.length > depth) stack.pop();
   stack.push(schedule);

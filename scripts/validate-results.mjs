@@ -5,6 +5,7 @@
 
 import { createReadStream, writeFileSync, renameSync } from 'fs';
 import { createInterface } from 'readline';
+import { isCompleteMarker, isIncompleteMarker } from '../lib/tree-format.mjs';
 
 const args = process.argv.slice(2);
 const fixMode = args.includes('--fix');
@@ -281,7 +282,8 @@ async function validate() {
   const seenPathHashes = enableDuplicateDetection ? new Set() : null;
 
   for await (const line of rl) {
-    if (line.startsWith('#') || line.trim() === '' || line.trim() === '…') continue;
+    const trimmed = line.trim();
+    if (line.startsWith('#') || trimmed === '' || isIncompleteMarker(trimmed) || isCompleteMarker(trimmed)) continue;
 
     // Count leading tabs for depth
     let depth = 0;

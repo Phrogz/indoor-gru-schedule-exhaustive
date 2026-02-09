@@ -3,6 +3,7 @@
 
 import { resolve } from 'path';
 import { readFileSync } from 'fs';
+import { COMPLETE_MARKER, INCOMPLETE_MARKER } from './lib/tree-format.mjs';
 
 // Parse command-line args
 const args = process.argv.slice(2);
@@ -50,9 +51,9 @@ for (let i = 1; i < lines.length; i++) {
 	let depth = 0;
 	while (depth < line.length && line[depth] === '\t') depth++;
 
-	// Skip incomplete markers
+	// Skip markers
 	const content = line.trim();
-	if (content === '…') continue;
+	if (content === INCOMPLETE_MARKER || content === COMPLETE_MARKER) continue;
 
 	const schedule = content.split(',').map(Number);
 
