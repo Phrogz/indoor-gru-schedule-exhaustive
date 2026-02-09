@@ -1462,12 +1462,17 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
       console.log(`Copying existing complete paths from ${resumeReadFile}...`);
       const reader = new TreeReader(resumeReadFile);
       let existingCount = 0;
+      const existingFoundCountsByPrefix = new Map(); // prefix key -> existing leaf count
       let batchPaths = [];
       const BATCH_SIZE = 10000;
 
       for await (const path of reader.paths()) {
         const pathHash = hashPath(path);
         existingPathHashes[hashShard(pathHash)].add(pathHash);
+        // Track how many continuations already exist per source prefix
+        // so resumed incomplete prefixes can start with correct skipOffset.
+        const prefixKey = path.slice(0, -1).map(s => s.join(',')).join('|');
+        existingFoundCountsByPrefix.set(prefixKey, (existingFoundCountsByPrefix.get(prefixKey) || 0) + 1);
         batchPaths.push(path);
         existingCount++;
         if (batchPaths.length >= BATCH_SIZE) {
@@ -1490,6 +1495,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
         : null;
       sourceFile = resumeData.sourceFile;
       resumeFilter = { completedKeys, incompleteKeys };
+      resumeData.existingFoundCountsByPrefix = existingFoundCountsByPrefix;
 
       const skippedComplete = completedKeys.size;
       const resumeIncomplete = incompleteKeys.size;
@@ -1525,7 +1531,17 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     const foundCounts = new Array(totalInputPaths).fill(0);  // How many optimal found per path
     const isComplete = new Array(totalInputPaths).fill(false);  // Whether path is fully explored
     const incompletePathsMap = new Map();  // Store incomplete paths by index (for streaming mode)
+    const inFlightPathIndices = new Set(); // Prevent duplicate concurrent dispatch of same path
     let currentRound = 0;   // Which "round" of breadth exploration we're on
+
+    // Resume mode: restore prior per-prefix progress so skipOffset starts at
+    // leaves already present in the partial file.
+    if (resumeData && inMemoryPaths && resumeData.existingFoundCountsByPrefix) {
+      for (let i = 0; i < inMemoryPaths.length; i++) {
+        const key = inMemoryPaths[i].map(s => s.join(',')).join('|');
+        foundCounts[i] = resumeData.existingFoundCountsByPrefix.get(key) || 0;
+      }
+    }
 
     // For streaming: we iterate through the file, yielding work units
     // When round ends, we re-stream from beginning for incomplete paths
@@ -1617,9 +1633,10 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
           pathIterator = null;
           roundComplete = true;
 
-          // Check if any paths still incomplete
-          const hasIncomplete = isComplete.some(c => !c);
-          if (hasIncomplete) {
+          // Check if any paths are incomplete AND not currently in flight
+          // (in-flight paths are still being processed in this round)
+          const hasIncompleteReady = isComplete.some((c, idx) => !c && !inFlightPathIndices.has(idx));
+          if (hasIncompleteReady) {
             currentRound++;
             pathsProcessedThisRound = 0;  // Reset for new round
             // Start new round - caller will call getNextWork again
@@ -1627,6 +1644,11 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
             currentPathIndex = 0;
             roundComplete = false;
             continue;  // Try again with new iterator
+          } else if (inFlightPathIndices.size > 0) {
+            // No ready work right now, but other workers are still running.
+            // Wait briefly for a result message to update state, then retry.
+            await new Promise(resolve => setTimeout(resolve, 10));
+            continue;
           } else {
             return null;  // All done
           }
@@ -1636,6 +1658,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
         currentPathIndex = index;
 
         if (!isComplete[index]) {
+          inFlightPathIndices.add(index);
           return {
             pathIndex: index,
             inputPath: path,
@@ -1815,6 +1838,7 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
           } else if (msg.type === 'result') {
             // Worker finished a work unit
             const { pathIndex, totalFound, schedulesChecked, isComplete: pathComplete } = msg;
+            inFlightPathIndices.delete(pathIndex);
 
             foundCounts[pathIndex] = totalFound;
             isComplete[pathIndex] = pathComplete;
