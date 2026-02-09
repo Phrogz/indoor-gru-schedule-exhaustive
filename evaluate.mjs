@@ -1,7 +1,8 @@
 // Tournament Schedule Evaluator
 // Reads multi-week schedules and scores them using weighted pain metrics
 
-import { writeFileSync } from 'fs';
+import { mkdirSync, writeFileSync } from 'fs';
+import { basename, join } from 'path';
 import { performance } from 'perf_hooks';
 import { TreeReader } from './lib/tree-format.mjs';
 
@@ -47,7 +48,7 @@ Examples:
   node evaluate.mjs results/6teams-5weeks.txt
   node evaluate.mjs --teams=6 --weeks=5
 
-Outputs best schedules to results/{N}teams-{W}weeks-best.txt
+Outputs best schedules to best/{N}teams-{W}weeks-best.txt
 `);
 		process.exit(0);
 	}
@@ -796,9 +797,10 @@ async function main() {
 	// Initialize constants based on resolved values
 	initConstants(teams, weeks);
 
-	const outputPath = CLI_ARGS.inputFile
-		? CLI_ARGS.inputFile.replace(/\.txt$/, '-best.txt')
-		: `results/${N_TEAMS}teams-${N_WEEKS}weeks-best.txt`;
+	const outputFilename = CLI_ARGS.inputFile
+		? basename(CLI_ARGS.inputFile).replace(/\.txt$/, '-best.txt')
+		: `${N_TEAMS}teams-${N_WEEKS}weeks-best.txt`;
+	const outputPath = join('best', outputFilename);
 
 	console.log(`Evaluating schedules from: ${inputPath}`);
 	console.log(`Teams: ${N_TEAMS}, Weeks: ${N_WEEKS}, Slots per week: ${N_SLOTS}`);
@@ -944,6 +946,7 @@ async function main() {
 	}
 
 	// Write results to file
+	mkdirSync('best', { recursive: true });
 	const outputLines = [];
 	outputLines.push(`# teams=${N_TEAMS} weeks=${N_WEEKS} count=${bestSchedules.length}`);
 	outputLines.push(`# Pain config: ${JSON.stringify(painConfig)}`);
