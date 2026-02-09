@@ -10,9 +10,9 @@ import { TreeReader } from './lib/tree-format.mjs';
 // ============================================================================
 
 const painConfig = {
-	doubleHeaderPain: { overall: 0.4,  unfairness: 1 },
-	doubleByePain:    { overall: 0.2,  unfairness: 2 },
-	totalSlotsPain:   { overall: 0.05, unfairness: 2 },
+	doubleHeaderPain: { overall: 0.1,  unfairness: 1 },
+	doubleByePain:    { overall: 0.1,  unfairness: 2 },
+	totalSlotsPain:   { overall: 0.01, unfairness: 4 },
 	earlyWeeks:       { overall: 0.01, unfairness: 1 },
 	lateWeeks:        { overall: 0.01, unfairness: 1 },
 	thirdVs2nd:       { overall: 0.05, unfairness: 5 },
