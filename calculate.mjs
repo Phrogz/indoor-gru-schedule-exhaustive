@@ -373,7 +373,7 @@ const CONTINUATION_MULTIPLIERS = {
     2: 32,       // Week 2 continuations per week 1
     3: 125,      // Week 3 continuations per week 2 (measured: 5.75M unique / 46K paths)
     4: 9147,     // Week 4 continuations per week 3
-    5: 22.73,    // Week 5 continuations per week 4
+    5: 64,       // Week 5 continuations per week 4
     6: 201600,   // Week 6 continuations per week 5
   }
 };
@@ -1134,9 +1134,9 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     if (!header.partial || header.weeks !== N_WEEKS) return null;
 
     const reader = new TreeReader(currentFile);
-    const { incompletePrefixes, completedPrefixes, isPartial } = await reader.findIncompleteBranches();
+    const { incompletePrefixes, completedPrefixes, isPartial, lastIncompletePrefix } = await reader.findIncompleteBranches();
 
-    return { file: currentFile, header, incompletePrefixes, completedPrefixes };
+    return { file: currentFile, header, incompletePrefixes, completedPrefixes, lastIncompletePrefix };
   }
 
   const week1File = `results/${N_TEAMS}teams-1week.txt`;
@@ -1180,6 +1180,9 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     const incompleteKeys = new Set(
       resumeData.incompletePrefixes.map(p => p.map(s => s.join(',')).join('|'))
     );
+    resumeData.lastIncompleteKey = resumeData.lastIncompletePrefix
+      ? resumeData.lastIncompletePrefix.map(s => s.join(',')).join('|')
+      : null;
 
     const skippedCount = resumeData.completedPrefixes.size + incompleteKeys.size;
     const unprocessedCount = totalSourcePaths - skippedCount;
@@ -1489,10 +1492,9 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
       const completedKeys = resumeData.completedKeys || new Set();
       const incompleteKeys = resumeData.incompleteKeys || new Set();
 
-      // Resume incomplete prefixes in-memory (small), stream all others from file
-      inMemoryPaths = resumeData.incompletePrefixes && resumeData.incompletePrefixes.length > 0
-        ? resumeData.incompletePrefixes
-        : null;
+      // Don't batch incomplete prefixes separately — let mod iterator handle them
+      // diversely interleaved with unprocessed paths. Their foundCounts are applied
+      // lazily in getNextWork via existingFoundCountsByPrefix.
       sourceFile = resumeData.sourceFile;
       resumeFilter = { completedKeys, incompleteKeys };
       resumeData.existingFoundCountsByPrefix = existingFoundCountsByPrefix;
@@ -1502,9 +1504,16 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
       const addedUnprocessed = resumeData.unprocessedCount || 0;
 
       console.log(`  Streaming source paths from ${resumeData.sourceFile}...`);
-      console.log(`  Source: ${skippedComplete} complete (skip), ${resumeIncomplete} incomplete (resume), ${addedUnprocessed} unprocessed (new)`);
+      console.log(`  Source: ${skippedComplete} complete (skip), ${resumeIncomplete} incomplete (resume diversely), ${addedUnprocessed} unprocessed (new)`);
 
-      totalInputPaths = (inMemoryPaths ? inMemoryPaths.length : 0) + addedUnprocessed;
+      totalInputPaths = addedUnprocessed + resumeIncomplete;
+
+      // Build tree index of source file for diverse iteration of unprocessed paths
+      if (sourceFile) {
+        const treeIndex = await buildTreeIndex(sourceFile);
+        var modIterator = new MultiLevelModIterator(sourceFile, treeIndex);
+        modIterator.open();
+      }
     } else if (priorFile && existsSync(priorFile) && !VALIDATE) {
       // Build tree index for diverse iteration (multi-level mod)
       sourceFile = priorFile;
@@ -1534,14 +1543,8 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
     const inFlightPathIndices = new Set(); // Prevent duplicate concurrent dispatch of same path
     let currentRound = 0;   // Which "round" of breadth exploration we're on
 
-    // Resume mode: restore prior per-prefix progress so skipOffset starts at
-    // leaves already present in the partial file.
-    if (resumeData && inMemoryPaths && resumeData.existingFoundCountsByPrefix) {
-      for (let i = 0; i < inMemoryPaths.length; i++) {
-        const key = inMemoryPaths[i].map(s => s.join(',')).join('|');
-        foundCounts[i] = resumeData.existingFoundCountsByPrefix.get(key) || 0;
-      }
-    }
+    // Resume mode: existingFoundCountsByPrefix is applied lazily in getNextWork
+    // when each path is first dispatched (see below)
 
     // For streaming: we iterate through the file, yielding work units
     // When round ends, we re-stream from beginning for incomplete paths
@@ -1560,7 +1563,44 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
         }
       }
 
-      if (resumeFilter && sourceFile) {
+      if (modIterator) {
+        // Diverse iteration via mod iterator (works in both fresh and resume modes)
+        // NOTE: Non-uniform child counts can cause duplicate path generation;
+        // we deduplicate here to avoid wasting worker computation
+        const dispatchedPathKeys = new Set();
+        let duplicatesSkipped = 0;
+        let resumeFiltered = 0;
+        // Use modIterator.totalPaths (immutable) - NOT totalInputPaths which shrinks after dedup
+        const stepCount = modIterator.totalPaths;
+        for (let step = 0; step < stepCount; step++) {
+          const result = modIterator.getPathAtStep(step);
+          if (result && result.path) {
+            const pathKey = result.path.map(s => s.join(',')).join('|');
+            if (!dispatchedPathKeys.has(pathKey)) {
+              // Skip completed paths in resume mode (incomplete paths are yielded
+              // diversely — their foundCounts are applied lazily in getNextWork)
+              if (resumeFilter && resumeFilter.completedKeys.has(pathKey)) {
+                resumeFiltered++;
+                continue;
+              }
+              dispatchedPathKeys.add(pathKey);
+              // Pass step (not index) as diversifyStep to maximize spread
+              yield { index: index++, path: result.path, diversifyStep: step };
+            } else {
+              duplicatesSkipped++;
+            }
+          }
+        }
+        const uniqueDispatched = index - (inMemoryPaths ? inMemoryPaths.length : 0);
+        if (duplicatesSkipped > 0 || resumeFiltered > 0) {
+          console.log(`  (Mod iterator: ${uniqueDispatched.toLocaleString()} unique dispatched, ${duplicatesSkipped.toLocaleString()} redundant skipped${resumeFiltered > 0 ? `, ${resumeFiltered.toLocaleString()} resume-filtered` : ''})`);
+        }
+        // Shrink tracking arrays to match actual dispatch count (avoids false incomplete detection)
+        totalInputPaths = index;
+        foundCounts.length = index;
+        isComplete.length = index;
+      } else if (resumeFilter && sourceFile) {
+        // Fallback: sequential streaming with resume filter (when mod iterator not available)
         const reader = new TreeReader(sourceFile);
         let fileIndex = 0;
         for await (const path of reader.paths()) {
@@ -1571,38 +1611,6 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
           }
           yield { index: index++, path, diversifyStep: fileIndex };
           fileIndex++;
-        }
-        return;
-      }
-
-      if (modIterator) {
-        // Multi-level mod iteration for diverse coverage
-        // NOTE: Non-uniform child counts can cause duplicate path generation;
-        // we deduplicate here to avoid wasting worker computation
-        const dispatchedPathKeys = new Set();
-        let uniqueIndex = 0;  // Sequential index for unique paths only
-        let duplicatesSkipped = 0;
-        const originalTotal = totalInputPaths;
-        for (let step = 0; step < originalTotal; step++) {
-          const result = modIterator.getPathAtStep(step);
-          if (result && result.path) {
-            const pathKey = result.path.map(s => s.join(',')).join('|');
-            if (!dispatchedPathKeys.has(pathKey)) {
-              dispatchedPathKeys.add(pathKey);
-              // Use sequential index for unique paths (not step, which has gaps)
-              // Pass step (not uniqueIndex) as diversifyStep to maximize spread
-              yield { index: uniqueIndex++, path: result.path, diversifyStep: step };
-            } else {
-              duplicatesSkipped++;
-            }
-          }
-        }
-        if (duplicatesSkipped > 0) {
-          console.log(`  (Mod iterator: ${duplicatesSkipped.toLocaleString()} redundant paths skipped, ${uniqueIndex.toLocaleString()} unique dispatched)`);
-          // Shrink tracking arrays to match actual unique count (avoids false incomplete detection)
-          totalInputPaths = uniqueIndex;
-          foundCounts.length = uniqueIndex;
-          isComplete.length = uniqueIndex;
         }
       } else if (sourceFile) {
         // Fallback: sequential file order
@@ -1656,6 +1664,14 @@ if (isMainThread && fileURLToPath(import.meta.url) === process.argv[1]) {
 
         const { index, path, diversifyStep } = next.value;
         currentPathIndex = index;
+
+        // Lazily apply existing foundCount from resume (for incomplete paths
+        // that the mod iterator yields diversely instead of batching upfront)
+        if (resumeData?.existingFoundCountsByPrefix && !(foundCounts[index] > 0)) {
+          const key = path.map(s => s.join(',')).join('|');
+          const existing = resumeData.existingFoundCountsByPrefix.get(key);
+          if (existing) foundCounts[index] = existing;
+        }
 
         if (!isComplete[index]) {
           inFlightPathIndices.add(index);
