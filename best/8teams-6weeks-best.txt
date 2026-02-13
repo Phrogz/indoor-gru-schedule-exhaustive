@@ -1,34 +1,84 @@
-# teams=8 weeks=6 count=1
-# Pain config: {"doubleHeaderPain":{"overall":0.01,"unfairness":1},"doubleByePain":{"overall":0.1,"unfairness":2},"totalSlotsPain":{"overall":0.01,"unfairness":4},"earlyWeeks":{"overall":0.01,"unfairness":1},"lateWeeks":{"overall":0.01,"unfairness":1},"thirdVs2nd":{"overall":0.05,"unfairness":5}}
-# Unfairness overall weight: 1
+File: best/8teams-6weeks-options.txt
+Format: best
+Teams: 8 (ABCDEFGH), Slots: 12
+Schedules in file: 1
 
-Schedule 1739014/3398184 :: Score: 9.29
+=== Schedule 2337/8279 ===
+AvB BvG AvG BvE AvE DvG CvE DvF DvH CvF CvH FvH
+CvD AvD AvC BvD BvC AvF BvH EvF FvG EvH GvH EvG
+AvB AvF BvF AvH BvH CvF DvH CvE CvG DvE DvG EvG
+AvH AvC GvH AvG CvH CvG EvF BvF DvE DvF BvE BvD
+BvG BvF FvG BvC CvG FvH CvD AvH EvH AvD DvE AvE
+BvE BvH CvE EvH BvC CvH FvG DvG AvF DvF AvG AvD
+
 Week 1: AvB BvG AvG BvE AvE DvG CvE DvF DvH CvF CvH FvH
+  A: B . G . E . . . . . . .  5 slots  -               -             3v2  early
+  B: A G . E . . . . . . . .  4 slots  double-header   -             -    early
+  C: . . . . . . E . . F H .  5 slots  double-header   double-bye    3v2  late
+  D: . . . . . G . F H . . .  4 slots  double-header   -             -    -
+  E: . . . B A . C . . . . .  4 slots  double-header   -             -    -
+  F: . . . . . . . D . C . H  5 slots  -               -             -    late
+  G: . B A . . D . . . . . .  5 slots  double-header   double-bye    -    early
+  H: . . . . . . . . D . C F  4 slots  double-header   -             -    late
+
 Week 2: CvD AvD AvC BvD BvC AvF BvH EvF FvG EvH GvH EvG
+  A: . D C . . F . . . . . .  5 slots  double-header   double-bye    -    early
+  B: . . . D C . H . . . . .  4 slots  double-header   -             -    -
+  C: D . A . B . . . . . . .  5 slots  -               -             3v2  early
+  D: C A . B . . . . . . . .  4 slots  double-header   -             -    early
+  E: . . . . . . . F . H . G  5 slots  -               -             -    late
+  F: . . . . . A . E G . . .  4 slots  double-header   -             -    -
+  G: . . . . . . . . F . H E  4 slots  double-header   -             -    late
+  H: . . . . . . B . . E G .  5 slots  double-header   double-bye    3v2  late
+
 Week 3: AvB AvF BvF AvH BvH CvF DvH CvE CvG DvE DvG EvG
+  A: B F . H . . . . . . . .  4 slots  double-header   -             -    early
+  B: A . F . H . . . . . . .  5 slots  -               -             3v2  early
+  C: . . . . . F . E G . . .  4 slots  double-header   -             -    -
+  D: . . . . . . H . . E G .  5 slots  double-header   double-bye    3v2  late
+  E: . . . . . . . C . D . G  5 slots  -               -             -    late
+  F: . A B . . C . . . . . .  5 slots  double-header   double-bye    -    early
+  G: . . . . . . . . C . D E  4 slots  double-header   -             -    late
+  H: . . . A B . D . . . . .  4 slots  double-header   -             -    -
+
 Week 4: AvH AvC GvH AvG CvH CvG EvF BvF DvE DvF BvE BvD
+  A: H C . G . . . . . . . .  4 slots  double-header   -             3v2  early
+  B: . . . . . . . F . . E D  5 slots  double-header   double-bye    -    late
+  C: . A . . H G . . . . . .  5 slots  double-header   double-bye    -    early
+  D: . . . . . . . . E F . B  4 slots  double-header   -             -    late
+  E: . . . . . . F . D . B .  5 slots  -               -             3v2  late
+  F: . . . . . . E B . D . .  4 slots  double-header   -             3v2  -
+  G: . . H A . C . . . . . .  4 slots  double-header   -             -    -
+  H: A . G . C . . . . . . .  5 slots  -               -             3v2  early
+
 Week 5: BvG BvF FvG BvC CvG FvH CvD AvH EvH AvD DvE AvE
+  A: . . . . . . . H . D . E  5 slots  -               -             -    late
+  B: G F . C . . . . . . . .  4 slots  double-header   -             -    early
+  C: . . . B G . D . . . . .  4 slots  double-header   -             -    -
+  D: . . . . . . C . . A E .  5 slots  double-header   double-bye    3v2  late
+  E: . . . . . . . . H . D A  4 slots  double-header   -             -    late
+  F: . B G . . H . . . . . .  5 slots  double-header   double-bye    -    early
+  G: B . F . C . . . . . . .  5 slots  -               -             3v2  early
+  H: . . . . . F . A E . . .  4 slots  double-header   -             -    -
+
 Week 6: BvE BvH CvE EvH BvC CvH FvG DvG AvF DvF AvG AvD
-doubleHeaderPain  : 0.36 (0.01 ×  36.0) A:4 B:5 C:5 D:5 E:3 F:5 G:5 H:4
-doubleByePain     : 1.20 (0.10 ×  12.0) A:1 B:2 C:2 D:2 E:0 F:2 G:2 H:1
-totalSlotsPain    : 2.16 (0.01 × 216.0) A:27 B:27 C:27 D:27 E:27 F:27 G:27 H:27
-earlyWeeks        : 0.18 (0.01 ×  18.0) A:4 B:4 C:2 D:1 E:1 F:2 G:2 H:2
-lateWeeks         : 0.18 (0.01 ×  18.0) A:2 B:1 C:1 D:4 E:4 F:1 G:3 H:2
-thirdVs2nd        : 0.80 (0.05 ×  16.0) A:2 B:2 C:2 D:2 E:2 F:2 G:2 H:2
-unfairPainPerTeam : 4.41 (1.00 ×   4.4) A:130 B:132 C:130 D:132 E:126 F:130 G:132 H:128
-    doubleHeaders : 0.71 (1.00 × 0.71)
-    doubleByes    : 1.41 (2.00 × 0.71)
-    totalSlots    : 0.00 (4.00 × 0.00)
-    earlyWeeks    : 1.09 (1.00 × 1.09)
-    lateWeeks     : 1.20 (1.00 × 1.20)
-    thirdVs2nd    : 0.00 (5.00 × 0.00)
-Team Matchups:
+  A: . . . . . . . . F . G D  4 slots  double-header   -             -    late
+  B: E H . . C . . . . . . .  5 slots  double-header   double-bye    3v2  early
+  C: . . E . B H . . . . . .  4 slots  double-header   -             -    -
+  D: . . . . . . . G . F . A  5 slots  -               -             -    late
+  E: B . C H . . . . . . . .  4 slots  double-header   -             3v2  early
+  F: . . . . . . G . A D . .  4 slots  double-header   -             3v2  -
+  G: . . . . . . F D . . A .  5 slots  double-header   double-bye    3v2  late
+  H: . B . E . C . . . . . .  5 slots  -               -             -    early
+
+Overall:
   A B C D E F G H
-A · 2 2 3 2 3 3 3
-B 2 · 3 2 3 3 2 3
-C 2 3 · 2 3 2 3 3
-D 3 2 2 · 3 3 3 2
-E 2 3 3 3 · 2 2 3
-F 3 3 2 3 2 · 3 2
-G 3 2 3 3 2 3 · 2
-H 3 3 3 2 3 2 2 ·
+A · 2 2 3 2 3 3 3  27×slots  4×double-headers  1×double-byes  2×3v2  4×early  2×late
+B 2 · 3 2 3 3 2 3  27×slots  5×double-headers  2×double-byes  2×3v2  4×early  1×late
+C 2 3 · 2 3 2 3 3  27×slots  5×double-headers  2×double-byes  2×3v2  2×early  1×late
+D 3 2 2 · 3 3 3 2  27×slots  5×double-headers  2×double-byes  2×3v2  1×early  4×late
+E 2 3 3 3 · 2 2 3  27×slots  3×double-headers  0×double-byes  2×3v2  1×early  4×late
+F 3 3 2 3 2 · 3 2  27×slots  5×double-headers  2×double-byes  2×3v2  2×early  1×late
+G 3 2 3 3 2 3 · 2  27×slots  5×double-headers  2×double-byes  2×3v2  2×early  3×late
+H 3 3 3 2 3 2 2 ·  27×slots  4×double-headers  1×double-byes  2×3v2  2×early  2×late
+

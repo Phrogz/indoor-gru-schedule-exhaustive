@@ -1,0 +1,61 @@
+# teams=8 weeks=4 count=2
+# Pain config: {"doubleHeaderPain":{"overall":0.1,"unfairness":1},"doubleByePain":{"overall":0.1,"unfairness":2},"totalSlotsPain":{"overall":0.01,"unfairness":4},"earlyWeeks":{"overall":0.01,"unfairness":1},"lateWeeks":{"overall":0.01,"unfairness":1},"thirdVs2nd":{"overall":0.05,"unfairness":5}}
+# Unfairness overall weight: 1
+
+Schedule 10077649/10674853 :: Score: 8.76
+Week 1: AvB BvC AvC BvD AvD CvG DvF GvH EvG FvH EvF EvH
+Week 2: FvG BvF BvG AvF AvG BvE AvH DvE CvE DvH CvH CvD
+Week 3: AvB AvE BvE AvH BvH EvF DvH FvG CvF DvG CvD CvG
+Week 4: EvG AvG AvE GvH EvH AvD CvH DvF BvD CvF BvC BvF
+doubleHeaderPain  : 2.40 (0.10 ×  24.0) A:3 B:3 C:4 D:3 E:3 F:3 G:2 H:3
+doubleByePain     : 0.80 (0.10 ×   8.0) A:1 B:1 C:2 D:1 E:1 F:1 G:0 H:1
+totalSlotsPain    : 1.44 (0.01 × 144.0) A:18 B:18 C:18 D:18 E:18 F:18 G:18 H:18
+earlyWeeks        : 0.12 (0.01 ×  12.0) A:3 B:3 C:1 D:0 E:2 F:1 G:2 H:0
+lateWeeks         : 0.12 (0.01 ×  12.0) A:0 B:1 C:3 D:2 E:1 F:2 G:1 H:2
+thirdVs2nd        : 0.40 (0.05 ×   8.0) A:1 B:1 C:1 D:1 E:1 F:1 G:1 H:1
+unfairPainPerTeam : 3.48 (1.00 ×   3.5) A:85 B:86 C:89 D:84 E:85 F:85 G:82 H:84
+    doubleHeaders : 0.50 (1.00 × 0.50)
+    doubleByes    : 1.00 (2.00 × 0.50)
+    totalSlots    : 0.00 (4.00 × 0.00)
+    earlyWeeks    : 1.12 (1.00 × 1.12)
+    lateWeeks     : 0.87 (1.00 × 0.87)
+    thirdVs2nd    : 0.00 (5.00 × 0.00)
+Team Matchups:
+  A B C D E F G H
+A · 2 1 2 2 1 2 2
+B 2 · 2 2 2 2 1 1
+C 1 2 · 2 1 2 2 2
+D 2 2 2 · 1 2 1 2
+E 2 2 1 1 · 2 2 2
+F 1 2 2 2 2 · 2 1
+G 2 1 2 1 2 2 · 2
+H 2 1 2 2 2 1 2 ·
+
+Schedule 10078209/10674853 :: Score: 8.76
+Week 1: AvB BvC AvC BvD AvD CvG DvF GvH EvG FvH EvF EvH
+Week 2: FvG BvF BvG AvF AvG BvE AvH DvE CvE DvH CvH CvD
+Week 3: AvB AvE BvE AvH BvH EvG CvH FvG DvG CvF CvD DvF
+Week 4: EvF AvF AvE FvH EvH AvC DvH CvG BvC DvG BvD BvG
+doubleHeaderPain  : 2.40 (0.10 ×  24.0) A:3 B:3 C:4 D:3 E:3 F:3 G:2 H:3
+doubleByePain     : 0.80 (0.10 ×   8.0) A:1 B:1 C:2 D:1 E:1 F:1 G:0 H:1
+totalSlotsPain    : 1.44 (0.01 × 144.0) A:18 B:18 C:18 D:18 E:18 F:18 G:18 H:18
+earlyWeeks        : 0.12 (0.01 ×  12.0) A:3 B:3 C:1 D:0 E:2 F:2 G:1 H:0
+lateWeeks         : 0.12 (0.01 ×  12.0) A:0 B:1 C:2 D:3 E:1 F:2 G:1 H:2
+thirdVs2nd        : 0.40 (0.05 ×   8.0) A:1 B:1 C:1 D:1 E:1 F:1 G:1 H:1
+unfairPainPerTeam : 3.48 (1.00 ×   3.5) A:85 B:86 C:88 D:85 E:85 F:86 G:81 H:84
+    doubleHeaders : 0.50 (1.00 × 0.50)
+    doubleByes    : 1.00 (2.00 × 0.50)
+    totalSlots    : 0.00 (4.00 × 0.00)
+    earlyWeeks    : 1.12 (1.00 × 1.12)
+    lateWeeks     : 0.87 (1.00 × 0.87)
+    thirdVs2nd    : 0.00 (5.00 × 0.00)
+Team Matchups:
+  A B C D E F G H
+A · 2 2 1 2 2 1 2
+B 2 · 2 2 2 1 2 1
+C 2 2 · 2 1 1 2 2
+D 1 2 2 · 1 2 2 2
+E 2 2 1 1 · 2 2 2
+F 2 1 1 2 2 · 2 2
+G 1 2 2 2 2 2 · 1
+H 2 1 2 2 2 2 1 ·
